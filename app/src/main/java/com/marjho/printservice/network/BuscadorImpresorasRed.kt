@@ -12,7 +12,10 @@ data class ImpresoraEncontrada(
     val nombre: String,
     val protocolo: String,
     val ip: String,
-    val puerto: Int
+    val puerto: Int,
+    val ippUri: String? = null,
+    val modeloAnunciado: String? = null,
+    val tiposServicio: Set<String> = setOf(protocolo)
 )
 
 class BuscadorImpresorasRed(context: Context) {
@@ -22,6 +25,8 @@ class BuscadorImpresorasRed(context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val tipos = listOf("_ipp._tcp.", "_ipps._tcp.", "_printer._tcp.", "_pdl-datastream._tcp.")
     private val encontrados = LinkedHashMap<String, ImpresoraEncontrada>()
+    private val timeoutBusqueda = Runnable { avanzar() }
+    private val duracionPorTipoMs = 1_500L
     private var indice = 0
     private var discovery: NsdManager.DiscoveryListener? = null
     private var lock: WifiManager.MulticastLock? = null
@@ -59,13 +64,16 @@ class BuscadorImpresorasRed(context: Context) {
             override fun onDiscoveryStarted(serviceType: String) {
                 activo = true
                 informar("Buscando $serviceType…")
+                main.removeCallbacks(timeoutBusqueda)
+                main.postDelayed(timeoutBusqueda, duracionPorTipoMs)
             }
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (service.serviceType?.contains(tipo.removeSuffix(".")) == true) resolver(service, tipo)
             }
             override fun onServiceLost(service: NsdServiceInfo) {
-                val key = service.serviceName
-                if (encontrados.remove(key) != null) publicar()
+                val keys = encontrados.filterValues { it.nombre == service.serviceName }.keys
+                keys.forEach(encontrados::remove)
+                if (keys.isNotEmpty()) publicar()
             }
             override fun onDiscoveryStopped(serviceType: String) = Unit
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
@@ -73,7 +81,7 @@ class BuscadorImpresorasRed(context: Context) {
                 avanzar()
             }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-                main.post { indice++; siguiente() }
+                informar("No se pudo detener la búsqueda de $serviceType (código $errorCode).")
             }
         }
         discovery = l
@@ -94,14 +102,43 @@ class BuscadorImpresorasRed(context: Context) {
                 }
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                     val address: InetAddress = serviceInfo.host ?: return
+                    val atributos = runCatching {
+                        serviceInfo.attributes.mapValues { (_, value) -> String(value, Charsets.UTF_8).trim() }
+                    }.getOrDefault(emptyMap())
+                    val servicio = tipo.removeSuffix(".")
+                    val protocolo = when (servicio) {
+                        "_ipp._tcp" -> "IPP"
+                        "_ipps._tcp" -> "IPPS"
+                        "_printer._tcp" -> "LPR"
+                        "_pdl-datastream._tcp" -> "RAW/9100"
+                        else -> servicio
+                    }
+                    val ruta = atributos["rp"].orEmpty().trimStart('/').ifBlank { "ipp/print" }
+                    val hostUri = address.hostAddress?.substringBefore('%') ?: return
+                    val hostUriSeguro = if (address.address.size == 16) "[$hostUri]" else hostUri
+                    val ippUri = when (servicio) {
+                        "_ipp._tcp" -> "ipp://$hostUriSeguro:${serviceInfo.port}/$ruta"
+                        "_ipps._tcp" -> "ipps://$hostUriSeguro:${serviceInfo.port}/$ruta"
+                        else -> null
+                    }
                     val item = ImpresoraEncontrada(
                         serviceInfo.serviceName,
-                        tipo.removeSuffix("."),
+                        protocolo,
                         address.hostAddress ?: return,
-                        serviceInfo.port
+                        serviceInfo.port,
+                        ippUri,
+                        atributos["ty"] ?: atributos["product"],
+                        setOf(protocolo)
                     )
                     main.post {
-                        encontrados[item.nombre + item.ip] = item
+                        val key = item.nombre.lowercase() + "|" + item.ip
+                        val anterior = encontrados[key]
+                        encontrados[key] = if (anterior == null) item else anterior.copy(
+                            protocolo = (anterior.tiposServicio + item.tiposServicio).joinToString(" + "),
+                            ippUri = anterior.ippUri ?: item.ippUri,
+                            modeloAnunciado = anterior.modeloAnunciado ?: item.modeloAnunciado,
+                            tiposServicio = anterior.tiposServicio + item.tiposServicio
+                        )
                         publicar()
                     }
                 }
@@ -120,6 +157,7 @@ class BuscadorImpresorasRed(context: Context) {
     }
 
     private fun pararDiscovery() {
+        main.removeCallbacks(timeoutBusqueda)
         val current = discovery
         discovery = null
         if (current != null) runCatching { nsd.stopServiceDiscovery(current) }

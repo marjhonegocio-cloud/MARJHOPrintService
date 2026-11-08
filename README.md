@@ -1,25 +1,25 @@
-# MARJHO Print Service 1.0.0
+# MARJHO Print Service 1.2.0
 
 Complemento Android independiente basado en `android.printservice.PrintService`.
 Su objetivo es aparecer en el selector de impresión del sistema Android y recibir documentos PDF de otras aplicaciones.
 
-## Alcance de esta entrega
+## Alcance actual
 
-- APK independiente con identificador `com.marjho.printservice`.
-- Servicio Android de impresión registrado mediante `android.printservice.PrintService`.
-- Pantalla de configuración para guardar manualmente la IP local de la Epson.
-- Prueba de conectividad TCP al puerto 9100.
-- Publicación de una impresora virtual del servicio en el selector Android.
-- Recepción de trabajos PDF desde el sistema.
-- Reutilización del controlador raster ESC/P-R existente de MARJHO (`ImpresorEscprDirecto` y `EscprRasterCodec`).
-- Envío local al puerto TCP 9100; no usa Epson Connect, nube ni Firebase.
-- Límite conservado del controlador MARJHO: hasta 20 páginas A4 por trabajo.
+- APK independiente con identificador `com.marjho.printservice` y servicio Android `PrintService`.
+- Descubrimiento DNS-SD/mDNS automático y consulta IPP/IPPS para determinar formatos y capacidades anunciados.
+- Envío de PDF por IPP solo cuando `application/pdf` aparece entre los formatos admitidos.
+- Flujo ESC/P-R existente para Epson L4150 configurada de forma explícita; no se infiere por el puerto TCP.
+- Editor PDF con vista por página, giro, eliminación de páginas, marca de agua y extracción de texto; editor DOCX básico y texto plano; conversión texto-PDF e imagen.
+- Exportación mediante el selector de documentos Android; no requiere nube ni Firebase.
+- Límite conservado del controlador ESC/P-R: hasta 20 páginas A4 por trabajo.
+
+El detalle actualizado y los límites de cada formato están en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md). Las secciones de etapas 1–3 que siguen documentan el historial y algunas limitaciones ya resueltas.
 
 ## Importante: Epson L4150
 
 La documentación oficial de Epson para L4150 especifica USB, Wi-Fi 802.11 b/g/n y Wi-Fi Direct. No especifica conector Ethernet RJ-45. Puede estar en la misma LAN que equipos conectados al router por cable Ethernet, pero la propia impresora se conecta por Wi-Fi. Para conexión Ethernet física directa hace falta otro modelo o un servidor/puente de impresión compatible.
 
-La documentación de funciones de red consultada no marca IPP convencional como compatible para esta serie. Por eso esta versión NO envía PDF por IPP. Reutiliza el flujo ESC/P-R sobre TCP 9100 del proyecto MARJHO. El puerto debe comprobarse en la red real; que acepte TCP no garantiza por sí solo que la impresora acepte el flujo ESC/P-R.
+La documentación de funciones de red consultada no marca IPP convencional como compatible para esta serie. MARJHO conserva ESC/P-R sobre TCP 9100 para la L4150; para otros modelos consulta IPP/IPPS y solo envía PDF si la propia impresora anuncia `application/pdf`. La respuesta de TCP 9100 por sí sola no confirma el lenguaje ni la impresión física.
 
 Fuentes oficiales consultadas:
 - Epson Argentina L4150: https://epson.com.ar/Para-el-hogar/Impresoras/Inyecci%C3%B3n-de-tinta/Impresora-Multifuncional-Epson-EcoTank-L4150/p/C11CG25303
@@ -30,7 +30,7 @@ Fuentes oficiales consultadas:
 
 Requisitos:
 - Android Studio reciente.
-- JDK 17.
+- JDK 21.
 - Android SDK Platform 36.
 - Conexión inicial para descargar Gradle y dependencias.
 
@@ -46,30 +46,33 @@ APK esperado:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-En esta revisión se corrigió una dependencia de código faltante (`RleEscpr.kt`) y se conectó la cancelación del trabajo con el controlador. Se intentó ejecutar `:app:assembleDebug`, pero este entorno no pudo descargar Gradle por falta de resolución DNS (`UnknownHostException: services.gradle.org`). El código se entrega como proyecto fuente, no como APK compilado ni validado en hardware.
+La validación de esta iteración se realizó compilando desde Android Studio. El flujo de impresora Epson L4150 por ESC/P-R ya se probó desde el Xiaomi conectado y el usuario confirmó que salió la hoja. Las funciones de edición documental requieren validación con archivos representativos antes de distribuir un APK.
 
 ## Instalar y configurar
 
 1. Compilar e instalar `app-debug.apk` en Android.
-2. Abrir MARJHO Print Service.
-3. Obtener la IP de la impresora imprimiendo su hoja de estado de red o consultando la lista DHCP del router.
-4. Ingresar esa IP y guardar.
-5. Ejecutar la prueba TCP 9100.
-6. Abrir "Ajustes de impresión de Android".
-7. Habilitar MARJHO Print Service.
-8. Desde otra aplicación, usar Compartir/Imprimir o Imprimir y seleccionar `EPSON L4150 Series (MARJHO)`.
+2. Abrir MARJHO Print Service y esperar la búsqueda local automática.
+3. Elegir la impresora detectada y revisar la ruta y capacidades que anunció.
+4. Para Epson L4150 sin anuncio IPP utilizable, ingresar la IP y seleccionar explícitamente el perfil Epson L4150.
+5. Abrir «Ajustes de impresión de Android» y habilitar MARJHO Print Service.
+6. Desde otra aplicación, imprimir y seleccionar la impresora de red detectada por MARJHO.
 
 El teléfono y la impresora deben poder comunicarse en la red local. En Wi-Fi Direct, conectar el teléfono al SSID Wi-Fi Direct de la impresora y usar la IP que informe la impresora para ese modo.
 
 ## Limitaciones de esta versión
 
-- La IP se configura manualmente; el descubrimiento automático mDNS/subred todavía no está implementado.
-- La ficha del servicio publica A4 y Carta, 360 dpi, color/monocromo y sin dúplex.
-- No se garantiza compatibilidad con todos los tamaños, bandejas ni opciones de calidad de Epson.
-- El envío directo TCP 9100/ESC-P-R debe probarse con el hardware y firmware concretos. La prueba de puerto solo valida conectividad TCP.
+- DNS-SD solo encuentra equipos que anuncian esos servicios; la IP manual sigue como respaldo.
+- LPR y RAW se reconocen, pero no se envían sin un controlador compatible identificado.
+- La ficha de Android usa el papel, color, dúplex y resolución que publica IPP. Si la impresora no los publica, Android necesita un valor básico de compatibilidad.
+- El flujo TCP 9100/ESC-P-R debe probarse con el firmware Epson concreto. El perfil manual confirma que el usuario seleccionó la L4150, no valida la salida física.
 - El servicio recibe PDF. Aplicaciones que no utilicen el framework de impresión Android no aparecerán automáticamente.
 - Ethernet físico no es posible en la L4150 sin hardware adicional porque el modelo no tiene puerto RJ-45.
 - La cancelación de un trabajo durante la transmisión no garantiza que la impresora pueda retirar páginas ya recibidas.
+- PDF escaneado requiere OCR, y la edición de texto extraído genera un PDF nuevo en vez de reemplazar texto dentro del diseño original.
+- DOCX permite cambiar texto de párrafos y guardar una copia del paquete, pero exige conservar la cantidad de párrafos y no ofrece maquetación fiel, encabezados/pies ni edición visual de tablas.
+- Los archivos de texto editables admiten hasta 2 MB y se exportan como UTF-8. PDF/DOCX e imágenes tienen límite de importación de 40 MB.
+- La app reconoce extensiones comunes de texto/código, aunque no aplica resaltado de sintaxis; RTF/HTML se manejan como texto fuente y no se renderizan.
+- La lectura de formatos de imagen menos comunes depende de los códecs disponibles en Android.
 
 ## Arquitectura
 
@@ -82,23 +85,22 @@ Android Print Framework
       v
 MarjhoPrintService (PrintService)
       |-- PrinterDiscoverySession
+      |-- DNS-SD + IPP/IPPS y capacidades
       |-- cola/cancelación de PrintJob
       |-- copia segura del PDF temporal
       |
-      v
-ImpresorEscprDirecto
+      +--> IPP Print-Job --> impresora que admite PDF
       |
-      v
-EscprRasterCodec
-      |
-      v
-TCP local :9100 --> Epson L4150
+      +--> ImpresorEscprDirecto --> TCP :9100 --> Epson L4150
 ```
 
 ## Archivos principales
 
 - `app/src/main/java/com/marjho/printservice/MarjhoPrintService.kt`: servicio de impresión Android.
 - `app/src/main/java/com/marjho/printservice/MainActivity.kt`: configuración y prueba de conexión.
+- `app/src/main/java/com/marjho/printservice/network/BuscadorImpresorasRed.kt`: descubrimiento DNS-SD/mDNS.
+- `app/src/main/java/com/marjho/printservice/network/ProtocoloImpresion.kt`: consulta IPP, selección de ruta y envío PDF.
+- `app/src/main/java/com/marjho/printservice/documents/GestorDocumentos.kt`: PDF, DOCX, texto e imagen.
 - `app/src/main/java/com/marjho/printservice/driver/ImpresorEscprDirecto.kt`: controlador existente extraído de MARJHO.
 - `app/src/main/java/com/marjho/printservice/driver/EscprRasterCodec.kt`: codificador raster existente extraído de MARJHO.
 - `app/src/main/java/com/marjho/printservice/driver/RleEscpr.kt`: compresión RLE requerida por el codificador raster.
@@ -107,6 +109,8 @@ TCP local :9100 --> Epson L4150
 ## Licencia y atribución
 
 Los archivos ESC/P-R reutilizados conservan sus comentarios originales. El codificador indica que toma como referencia el proyecto abierto `python-epson` (Jason S. McMullan, MIT, 2016), y aclara que no es un SDK oficial de Epson. Antes de distribuir comercialmente el APK, revisar el texto de licencia y las obligaciones de atribución del código de referencia original.
+
+Las nuevas dependencias se documentan en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md): `ipp-client-kotlin` (MIT) y `PdfBox-Android` (Apache-2.0).
 
 ## Etapa 2 — Editor de etiquetas y vista previa
 

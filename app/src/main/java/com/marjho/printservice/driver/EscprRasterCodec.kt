@@ -10,8 +10,9 @@ import java.time.LocalDateTime
  * Basado en la secuencia de protocolo documentada por el proyecto abierto
  * python-epson (Jason S. McMullan, MIT, 2016); ver AVISO_LICENCIA_ESCPR.txt.
  *
- * La impresora L4150 declara ESC/P-R, pero la compatibilidad de este flujo
- * específico sobre TCP/9100 aún debe probarse con hardware real.
+ * Este flujo por TCP/9100 se verificó físicamente con una página en una
+ * Epson L4150 el 2026-11-08. Los trabajos multipágina y otros modelos aún
+ * requieren validación en hardware.
  * La salida NO es PDF ni ESC/POS.
  */
 class EscprRasterCodec(salida: OutputStream) {
