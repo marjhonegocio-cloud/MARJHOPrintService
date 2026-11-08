@@ -6,124 +6,176 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.util.LruCache
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import com.marjho.printservice.documents.GestorDocumentos
+import com.marjho.printservice.documents.PdfMarkStroke
+import com.marjho.printservice.documents.PdfMarkup
+import com.marjho.printservice.documents.PdfPageSize
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.ProtocoloImpresion
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.Executors
 
 class PdfViewActivity : ComponentActivity() {
+    private val renderDispatcher: CoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "MARJHO-PDF-render").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }.asCoroutineDispatcher()
+    private var renderer: PdfRenderer? = null
+    private var descriptor: ParcelFileDescriptor? = null
+    private var pendingSaveFile: File? = null
+    private val bitmaps = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        val savePdfLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+            val source = pendingSaveFile
+            pendingSaveFile = null
+            if (uri != null && source != null) {
+                lifecycleScope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            contentResolver.openOutputStream(uri, "wt")?.use { output -> source.inputStream().use { it.copyTo(output) } }
+                                ?: error("No se pudo crear el PDF en la ubicación elegida.")
+                        }
+                    }.onSuccess { Toast.makeText(this@PdfViewActivity, "Copia PDF guardada.", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(this@PdfViewActivity, it.localizedMessage ?: "No se pudo guardar el PDF.", Toast.LENGTH_LONG).show() }
+                }
+            }
+        }
+
         setContent {
             MaterialTheme {
                 var archivo by remember { mutableStateOf<File?>(null) }
-                var pagina by remember { mutableIntStateOf(0) }
-                var paginas by remember { mutableIntStateOf(0) }
-                var vista by remember { mutableStateOf<Bitmap?>(null) }
+                var paginasTotales by remember { mutableIntStateOf(0) }
+                var paginasCargadas by remember { mutableIntStateOf(0) }
+                var tamanosPagina by remember { mutableStateOf<Map<Int, PdfPageSize>>(emptyMap()) }
+                val marcas = remember { mutableStateMapOf<Int, List<PdfMarkStroke>>() }
+                val ordenMarcas = remember { androidx.compose.runtime.mutableStateListOf<Int>() }
                 var cargando by remember { mutableStateOf(true) }
+                var cargandoMas by remember { mutableStateOf(false) }
                 var imprimiendo by remember { mutableStateOf(false) }
+                var guardando by remember { mutableStateOf(false) }
                 var mensaje by remember { mutableStateOf<String?>(null) }
-                val scope = rememberCoroutineScope()
+                val scope = androidx.compose.runtime.rememberCoroutineScope()
 
-                LaunchedEffect(Unit) {
+                androidx.compose.runtime.LaunchedEffect(Unit) {
                     try {
-                        val local = intent.getStringExtra(EXTRA_FILE_PATH)
-                        val pdf = withContext(Dispatchers.IO) {
-                            if (local != null) {
-                                val candidato = File(local).canonicalFile
-                                val permitidos = listOf(
-                                    File(filesDir, "recent_documents").canonicalFile,
-                                    cacheDir.canonicalFile
-                                )
-                                require(candidato.isFile && permitidos.any { candidato.parentFile == it } && candidato.extension.equals("pdf", true)) {
-                                    "El PDF local ya no está disponible."
-                                }
-                                candidato
-                            } else {
-                                require(intent.action == Intent.ACTION_VIEW) { "Elegí un archivo PDF para abrirlo." }
-                                val uri = requireNotNull(intent.data) { "No se recibió el archivo PDF." }
-                                val tipo = contentResolver.getType(uri)
-                                require(tipo == null || tipo == "application/pdf" || uri.lastPathSegment.orEmpty().endsWith(".pdf", true)) {
-                                    "PDF View solo puede abrir archivos PDF."
-                                }
-                                val abierto = GestorDocumentos.importar(this@PdfViewActivity, uri, leerTextoPdf = false)
-                                require(abierto.extension == "pdf") { "El archivo seleccionado no es un PDF válido." }
-                                abierto.archivo
-                            }
-                        }
-                        val total = withContext(Dispatchers.IO) {
-                            ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY).use { fd ->
-                                PdfRenderer(fd).use { it.pageCount }
+                        val pdf = withContext(Dispatchers.IO) { localizarPdf() }
+                        val total = withContext(renderDispatcher) {
+                            val fd = ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY)
+                            try {
+                                val abierto = PdfRenderer(fd)
+                                descriptor = fd
+                                renderer = abierto
+                                abierto.pageCount
+                            } catch (error: Exception) {
+                                fd.close()
+                                throw error
                             }
                         }
                         require(total > 0) { "El PDF no contiene páginas." }
                         archivo = pdf
-                        paginas = total
+                        paginasTotales = total
+                        paginasCargadas = minOf(10, total)
+                        tamanosPagina = leerTamanos(0, paginasCargadas)
                     } catch (error: Exception) {
                         mensaje = error.localizedMessage ?: "No se pudo abrir el PDF."
+                    } finally {
                         cargando = false
                     }
                 }
 
-                LaunchedEffect(archivo, pagina) {
-                    val pdf = archivo ?: return@LaunchedEffect
-                    cargando = true
-                    vista = withContext(Dispatchers.IO) { renderizarPagina(pdf, pagina) }
-                    cargando = false
-                }
-
-                LaunchedEffect(mensaje) {
+                androidx.compose.runtime.LaunchedEffect(mensaje) {
                     val texto = mensaje ?: return@LaunchedEffect
-                    kotlinx.coroutines.delay(4000)
+                    kotlinx.coroutines.delay(4500)
                     if (mensaje == texto) mensaje = null
                 }
 
                 PdfViewerScreen(
-                    bitmap = vista,
-                    pagina = pagina,
-                    totalPaginas = paginas,
+                    totalPaginas = paginasTotales,
+                    paginasCargadas = paginasCargadas,
+                    tamanosPagina = tamanosPagina,
+                    marcas = marcas,
+                    renderizarPagina = ::renderizarPagina,
                     cargando = cargando,
                     imprimiendo = imprimiendo,
+                    guardando = guardando,
                     mensaje = mensaje,
-                    onCambiarPagina = { pagina = it.coerceIn(0, (paginas - 1).coerceAtLeast(0)) },
+                    onCargarMas = {
+                        if (!cargandoMas && paginasCargadas < paginasTotales) {
+                            val inicio = paginasCargadas
+                            val fin = minOf(inicio + 10, paginasTotales)
+                            cargandoMas = true
+                            paginasCargadas = fin
+                            scope.launch {
+                                try {
+                                    tamanosPagina = tamanosPagina + leerTamanos(inicio, fin)
+                                } catch (error: Exception) {
+                                    mensaje = error.localizedMessage ?: "No se pudieron cargar más páginas."
+                                } finally {
+                                    cargandoMas = false
+                                }
+                            }
+                        }
+                    },
+                    onAgregarMarca = { index, stroke ->
+                        marcas[index] = marcas[index].orEmpty() + stroke
+                        ordenMarcas.add(index)
+                    },
+                    onDeshacer = {
+                        if (ordenMarcas.isNotEmpty()) {
+                            val index = ordenMarcas.removeAt(ordenMarcas.lastIndex)
+                            val strokes = marcas[index].orEmpty()
+                            if (strokes.size <= 1) marcas.remove(index) else marcas[index] = strokes.dropLast(1)
+                        }
+                    },
                     onCompartir = {
-                        val pdf = archivo ?: return@PdfViewerScreen
-                        runCatching { compartir(pdf) }
-                            .onFailure { mensaje = it.localizedMessage ?: "No se pudo compartir el PDF." }
+                        val original = archivo ?: return@PdfViewerScreen
+                        scope.launch {
+                            try {
+                                val paraCompartir = prepararDocumento(original, marcas.toMap())
+                                compartir(paraCompartir)
+                            } catch (error: Exception) {
+                                mensaje = error.localizedMessage ?: "No se pudo compartir el PDF."
+                            }
+                        }
                     },
                     onImprimir = {
-                        val pdf = archivo ?: return@PdfViewerScreen
+                        val original = archivo ?: return@PdfViewerScreen
                         if (!imprimiendo) scope.launch {
                             imprimiendo = true
                             try {
-                                val impresora = DestinoImpresion.desde(
-                                    getSharedPreferences("marjho_print_local", MODE_PRIVATE)
-                                ) ?: error("Elegí una impresora en la sección Red antes de imprimir.")
+                                val pdf = prepararDocumento(original, marcas.toMap())
+                                val impresora = DestinoImpresion.desde(getSharedPreferences("marjho_print_local", MODE_PRIVATE))
+                                    ?: error("Elegí una impresora en la sección Red antes de imprimir.")
                                 require(impresora.puedeImprimirPdfPorIpp || impresora.esEpsonL4150) {
                                     "La impresora guardada no admite envío directo de PDF. Configurá IPP/PDF o el perfil Epson L4150 en Red."
                                 }
@@ -134,40 +186,110 @@ class PdfViewActivity : ComponentActivity() {
                                 imprimiendo = false
                             }
                         }
+                    },
+                    onGuardarCopia = {
+                        val original = archivo ?: return@PdfViewerScreen
+                        if (!guardando) scope.launch {
+                            guardando = true
+                            try {
+                                val markedCopy = withContext(Dispatchers.IO) { PdfMarkup.export(this@PdfViewActivity, original, marcas.toMap()) }
+                                pendingSaveFile = markedCopy
+                                savePdfLauncher.launch("${original.nameWithoutExtension}_anotado.pdf")
+                            } catch (error: Exception) {
+                                mensaje = error.localizedMessage ?: "No se pudo preparar la copia anotada."
+                            } finally {
+                                guardando = false
+                            }
+                        }
                     }
                 )
             }
         }
     }
 
+    private suspend fun localizarPdf(): File {
+        val local = intent.getStringExtra(EXTRA_FILE_PATH)
+        if (local != null) {
+            val candidate = File(local).canonicalFile
+            val allowed = listOf(File(filesDir, "recent_documents").canonicalFile, cacheDir.canonicalFile)
+            require(candidate.isFile && allowed.any { candidate.parentFile == it } && candidate.extension.equals("pdf", true)) {
+                "El PDF local ya no está disponible."
+            }
+            return candidate
+        }
+        require(intent.action == Intent.ACTION_VIEW) { "Elegí un archivo PDF para abrirlo." }
+        val uri = requireNotNull(intent.data) { "No se recibió el archivo PDF." }
+        val mime = contentResolver.getType(uri)
+        require(mime == null || mime == "application/pdf" || uri.lastPathSegment.orEmpty().endsWith(".pdf", true)) {
+            "PDF View solo puede abrir archivos PDF."
+        }
+        val imported = withContext(Dispatchers.IO) { GestorDocumentos.importar(this@PdfViewActivity, uri, leerTextoPdf = false) }
+        require(imported.extension == "pdf") { "El archivo seleccionado no es un PDF válido." }
+        return imported.archivo
+    }
+
+    private suspend fun leerTamanos(start: Int, end: Int): Map<Int, PdfPageSize> = withContext(renderDispatcher) {
+        val pdfRenderer = renderer ?: error("El documento todavía no está listo.")
+        buildMap {
+            for (index in start until end) {
+                pdfRenderer.openPage(index).use { page -> put(index, PdfPageSize(page.width, page.height)) }
+            }
+        }
+    }
+
+    private suspend fun renderizarPagina(index: Int, targetWidth: Int): Bitmap? = withContext(renderDispatcher) {
+        val renderer = renderer ?: return@withContext null
+        val width = targetWidth.coerceIn(320, 1440)
+        val key = "$index:$width"
+        bitmaps.get(key)?.let { return@withContext it }
+        if (index !in 0 until renderer.pageCount) return@withContext null
+        renderer.openPage(index).use { page ->
+            val ratio = page.height.toFloat() / page.width.coerceAtLeast(1)
+            val outputWidth = minOf(width, 1440)
+            val outputHeight = (outputWidth * ratio).toInt().coerceIn(1, 3600)
+            val bitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(android.graphics.Color.WHITE)
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            bitmaps.put(key, bitmap)
+            bitmap
+        }
+    }
+
+    private suspend fun prepararDocumento(original: File, marks: Map<Int, List<PdfMarkStroke>>): File {
+        if (marks.values.none { list -> list.any { it.points.size > 1 } }) return original
+        return withContext(Dispatchers.IO) { PdfMarkup.export(this@PdfViewActivity, original, marks) }
+    }
+
     private fun compartir(pdf: File) {
         val uri = FileProvider.getUriForFile(this, "$packageName.files", pdf)
-        val compartir = Intent(Intent.ACTION_SEND).apply {
+        val send = Intent(Intent.ACTION_SEND).apply {
             type = "application/pdf"
             putExtra(Intent.EXTRA_STREAM, uri)
             clipData = ClipData.newUri(contentResolver, pdf.name, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(compartir, "Compartir PDF"))
+        startActivity(Intent.createChooser(send, "Compartir PDF"))
     }
 
-    private fun renderizarPagina(pdf: File, indice: Int): Bitmap? =
-        ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            PdfRenderer(descriptor).use { renderer ->
-                if (indice !in 0 until renderer.pageCount) return null
-                renderer.openPage(indice).use { page ->
-                    val escala = minOf(1600f / page.width, 2200f / page.height, 2.2f)
-                    Bitmap.createBitmap(
-                        (page.width * escala).toInt().coerceAtLeast(1),
-                        (page.height * escala).toInt().coerceAtLeast(1),
-                        Bitmap.Config.ARGB_8888
-                    ).also {
-                        it.eraseColor(android.graphics.Color.WHITE)
-                        page.render(it, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    }
-                }
-            }
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) bitmaps.trimToSize(8 * 1024 * 1024)
+        if (level >= TRIM_MEMORY_BACKGROUND) bitmaps.evictAll()
+    }
+
+    override fun onDestroy() {
+        val activeRenderer = renderer
+        val activeDescriptor = descriptor
+        renderer = null
+        descriptor = null
+        kotlinx.coroutines.CoroutineScope(renderDispatcher).launch {
+            runCatching { activeRenderer?.close() }
+            runCatching { activeDescriptor?.close() }
+            bitmaps.evictAll()
+            (renderDispatcher as? kotlinx.coroutines.ExecutorCoroutineDispatcher)?.close()
         }
+        super.onDestroy()
+    }
 
     companion object {
         const val EXTRA_FILE_PATH = "com.marjho.printservice.PDF_PATH"
