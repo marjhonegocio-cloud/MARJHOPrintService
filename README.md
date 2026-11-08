@@ -113,3 +113,30 @@ Los archivos ESC/P-R reutilizados conservan sus comentarios originales. El codif
 Se agregó un editor visual independiente con Compose. Permite mover nombre, precio y código sobre la etiqueta, cambiar tamaños, alternar campos, elegir hoja con múltiples etiquetas o etiqueta individual, configurar ancho/alto en mm, filas, columnas, márgenes y separaciones. Genera un PDF y abre el diálogo nativo de impresión Android.
 
 **Limitación de esta etapa:** la L4150 continúa usando raster ESC/P-R A4 a 360 dpi. La etiqueta individual se centra en una hoja A4 portadora. Los tamaños físicos A5/Carta/Legal y rollos no se deben considerar compatibles hasta adaptar el protocolo y probarlos con papel real. Ver `docs/ETAPA_2_EDITOR_Y_FORMATOS.md`.
+
+
+## Etapa 3 — Red local y documentos (primera integración)
+
+Se reorganizó la pantalla en secciones y se añadieron:
+- Descubrimiento DNS-SD/mDNS de servicios `_ipp._tcp`, `_ipps._tcp`, `_printer._tcp` y `_pdl-datastream._tcp`.
+- Ventana emergente de resultados; al tocar un resultado se guarda su IP como destino activo.
+- IP manual, prueba TCP 9100 y envío directo ESC/P-R para PDF A4.
+- Importación mediante Storage Access Framework de PDF, DOCX, TXT e imágenes.
+- Vista previa de primera página PDF.
+- Edición de texto plano TXT.
+- Extracción del texto visible de DOCX para editarlo como borrador y guardarlo como TXT.
+- Edición básica de imagen: rotar 90 grados y guardar PNG.
+- Conversión de imagen a PDF A4 para imprimir.
+- Se conserva el editor de etiquetas y el PrintService del sistema.
+
+### Límites explícitos de esta etapa
+- La extracción DOCX no reescribe el DOCX original ni conserva tablas, estilos, encabezados o imágenes; se exporta el texto editado como TXT.
+- El PDF se visualiza y se puede imprimir; no se modifica el texto original del PDF ni se anotan/reestructuran páginas en esta etapa.
+- El editor de imagen de esta etapa solo rota; no incluye todavía recorte, capas, filtros o borrador.
+- La búsqueda mDNS solo detecta servicios anunciados. Una impresora encontrada no implica que acepte ESC/P-R. El envío directo ESC/P-R sigue siendo específico del flujo validado para Epson L4150 y debe probarse en hardware.
+- El envío directo conserva el límite del controlador de 20 páginas por trabajo.
+- Para DOCX/TXT y PDF que no estén en un formato compatible con el controlador, utilizar una aplicación externa para convertirlos a PDF y luego abrir ese PDF en MARJHO.
+- La selección de un servicio IPP no activa automáticamente IPP: la ficha encontrada solo identifica el anuncio DNS-SD. La negociación IPP y la consulta de capacidades se implementarán como módulo separado, evitando enviar comandos incorrectos.
+
+### Compilación
+Abrir la carpeta `MARJHO_Print_Service` en Android Studio con JDK 21 y Android SDK 36. Sincronizar Gradle y ejecutar `:app:assembleDebug`.
