@@ -36,9 +36,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
 import com.marjho.printservice.documents.DocumentoAbierto
+import com.marjho.printservice.documents.DocumentoReciente
 import com.marjho.printservice.documents.GestorDocumentos
-import com.marjho.printservice.editor.EditorEtiquetaCanvas
-import com.marjho.printservice.editor.EditorEtiquetaState
+import com.marjho.printservice.documents.OcrPdf
 import com.marjho.printservice.network.BuscadorImpresorasRed
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.ImpresoraEncontrada
@@ -54,7 +54,7 @@ import java.util.concurrent.atomic.AtomicReference
 private enum class SeccionApp(val titulo: String, val etiqueta: String) {
     IMPRESORA("Impresora", "Red"),
     ARCHIVOS("Documentos", "Archivos"),
-    ETIQUETAS("Etiquetas", "Etiquetas"),
+    PDF("PDF", "PDF"),
     AJUSTES("Ajustes", "Ajustes")
 }
 
@@ -85,13 +85,16 @@ private fun IconoSeccion(seccion: SeccionApp, seleccionado: Boolean) {
                 drawLine(color, punto(9f, 12f), punto(16f, 12f), linea.width)
                 drawLine(color, punto(9f, 16f), punto(16f, 16f), linea.width)
             }
-            SeccionApp.ETIQUETAS -> {
-                val etiqueta = Path().apply {
-                    moveTo(4f * sx, 4f * sy); lineTo(15f * sx, 4f * sy); lineTo(21f * sx, 10f * sy)
-                    lineTo(12f * sx, 20f * sy); lineTo(4f * sx, 12f * sy); close()
+            SeccionApp.PDF -> {
+                val hojaPdf = Path().apply {
+                    moveTo(6f * sx, 2.5f * sy); lineTo(14f * sx, 2.5f * sy); lineTo(19f * sx, 7.5f * sy)
+                    lineTo(19f * sx, 21.5f * sy); lineTo(6f * sx, 21.5f * sy); close()
                 }
-                drawPath(etiqueta, color, style = linea)
-                drawCircle(color, 1.1f * sx, punto(9f, 9f), style = linea)
+                drawPath(hojaPdf, color, style = linea)
+                drawLine(color, punto(14f, 3f), punto(14f, 8f), linea.width)
+                drawLine(color, punto(14f, 8f), punto(19f, 8f), linea.width)
+                drawLine(color, punto(8f, 13f), punto(16f, 13f), linea.width)
+                drawLine(color, punto(8f, 17f), punto(16f, 17f), linea.width)
             }
             SeccionApp.AJUSTES -> {
                 drawCircle(color, 6f * sx, punto(12f, 12f), style = linea)
@@ -109,6 +112,12 @@ private fun IconoSeccion(seccion: SeccionApp, seleccionado: Boolean) {
 
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("marjho_print_local", MODE_PRIVATE) }
+    private var recientesUi: androidx.compose.runtime.MutableState<List<DocumentoReciente>>? = null
+
+    override fun onResume() {
+        super.onResume()
+        recientesUi?.value = GestorDocumentos.listarRecientes(this)
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -124,6 +133,10 @@ class MainActivity : ComponentActivity() {
                 var buscando by remember { mutableStateOf(false) }
                 var busquedaAutomatica by remember { mutableStateOf(true) }
                 var seccion by remember { mutableStateOf(SeccionApp.IMPRESORA) }
+                val estadoRecientes = remember { mutableStateOf(GestorDocumentos.listarRecientes(this@MainActivity)) }
+                recientesUi = estadoRecientes
+                var recientes by estadoRecientes
+                var pickerDesdePdf by remember { mutableStateOf(true) }
                 var configIpPopup by remember { mutableStateOf(false) }
                 var perfilPopup by remember { mutableStateOf(false) }
                 var busy by remember { mutableStateOf(false) }
@@ -141,8 +154,6 @@ class MainActivity : ComponentActivity() {
                 var formatoImagen by remember { mutableStateOf("PNG") }
                 var menuFormatoImagen by remember { mutableStateOf(false) }
                 var archivoParaExportar by remember { mutableStateOf<File?>(null) }
-                var layout by remember { mutableStateOf(LabelLayout()) }
-                var editor by remember { mutableStateOf(EditorEtiquetaState()) }
                 val scope = rememberCoroutineScope()
                 val finder = remember { BuscadorImpresorasRed(this@MainActivity) }
                 val resultadosRecientes = remember { AtomicReference(emptyList<ImpresoraEncontrada>()) }
@@ -171,18 +182,52 @@ class MainActivity : ComponentActivity() {
                         busy = true
                         scope.launch {
                             try {
-                                val loaded = withContext(Dispatchers.IO) { GestorDocumentos.importar(this@MainActivity, uri) }
-                                documento = loaded
-                                seccion = SeccionApp.ARCHIVOS
-                                textoEditado = loaded.texto.orEmpty()
-                                imagenEditada = loaded.imagen
-                                paginaPdf = 0
-                                pdfPreview = if (loaded.extension == "pdf") withContext(Dispatchers.IO) { renderPdfPage(loaded.archivo, 0) } else null
-                                status = "Abierto: ${loaded.nombre}"
+                                val loaded = withContext(Dispatchers.IO) {
+                                    GestorDocumentos.importar(this@MainActivity, uri, leerTextoPdf = !pickerDesdePdf)
+                                }
+                                recientes = GestorDocumentos.listarRecientes(this@MainActivity)
+                                if (loaded.extension == "pdf" && pickerDesdePdf) {
+                                    seccion = SeccionApp.PDF
+                                    status = "Abierto en PDF View: ${loaded.nombre}"
+                                    startActivity(PdfViewActivity.intent(this@MainActivity, loaded.archivo))
+                                } else {
+                                    documento = loaded
+                                    seccion = SeccionApp.ARCHIVOS
+                                    textoEditado = loaded.texto.orEmpty()
+                                    imagenEditada = loaded.imagen
+                                    paginaPdf = 0
+                                    pdfPreview = if (loaded.extension == "pdf") withContext(Dispatchers.IO) { renderPdfPage(loaded.archivo, 0) } else null
+                                    status = "Abierto: ${loaded.nombre}"
+                                }
                             } catch (e: Exception) {
                                 status = "No se pudo abrir: ${e.localizedMessage}"
                             } finally { busy = false }
                         }
+                    }
+                }
+
+                fun abrirReciente(reciente: DocumentoReciente) {
+                    if (reciente.extension == "pdf") {
+                        seccion = SeccionApp.PDF
+                        startActivity(PdfViewActivity.intent(this@MainActivity, reciente.archivo))
+                        return
+                    }
+                    busy = true
+                    scope.launch {
+                        try {
+                            val loaded = withContext(Dispatchers.IO) {
+                                GestorDocumentos.abrirReciente(this@MainActivity, reciente.archivo)
+                            }
+                            documento = loaded
+                            textoEditado = loaded.texto.orEmpty()
+                            imagenEditada = loaded.imagen
+                            pdfPreview = null
+                            seccion = SeccionApp.ARCHIVOS
+                            status = "Abierto: ${loaded.nombre}"
+                        } catch (e: Exception) {
+                            status = "No se pudo abrir: ${e.localizedMessage}"
+                            recientes = GestorDocumentos.listarRecientes(this@MainActivity)
+                        } finally { busy = false }
                     }
                 }
 
@@ -308,10 +353,11 @@ class MainActivity : ComponentActivity() {
                     if (seccion == SeccionApp.ARCHIVOS) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                            Text("2. Documentos y archivos", style = MaterialTheme.typography.titleLarge)
+                            Text("Documentos y archivos", style = MaterialTheme.typography.titleLarge)
                             Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
+                                pickerDesdePdf = false
                                 picker.launch(arrayOf("*/*"))
-                            }) { Text(if (busy) "Abriendo…" else "Abrir PDF, Word, texto o imagen") }
+                            }) { Text(if (busy) "Abriendo…" else "Buscar PDF, Word, texto o imagen") }
                             documento?.let { doc ->
                                 Text("${doc.nombre} · ${doc.extension.uppercase()}")
                                 when {
@@ -327,12 +373,12 @@ class MainActivity : ComponentActivity() {
                                             label = { Text("Contenido") }
                                         )
                                         if (doc.extension == "docx") {
-                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                                OutlinedButton(enabled = !busy, onClick = {
+                                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
                                                     val f = GestorDocumentos.guardarTexto(this@MainActivity, doc.nombre, textoEditado)
                                                     exportar(f, "${doc.nombre.substringBeforeLast('.', doc.nombre)}_editado.txt")
                                                 }) { Text("Exportar TXT") }
-                                                Button(enabled = !busy, onClick = {
+                                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
                                                     scope.launch {
                                                         busy = true
                                                         try {
@@ -376,32 +422,60 @@ class MainActivity : ComponentActivity() {
                                     }
                                     doc.extension == "pdf" -> {
                                         Text("PDF · ${doc.paginasPdf} páginas")
-                                        pdfPreview?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxWidth().heightIn(max = 420.dp)) }
-                                        Text("Página ${paginaPdf + 1} de ${doc.paginasPdf}. El PDF original conserva texto y gráficos al girar o agregar la marca.")
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(enabled = paginaPdf > 0 && !busy, onClick = {
-                                                paginaPdf--
-                                                scope.launch { pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(doc.archivo, paginaPdf) } }
-                                            }) { Text("Anterior") }
-                                            OutlinedButton(enabled = paginaPdf < doc.paginasPdf - 1 && !busy, onClick = {
-                                                paginaPdf++
-                                                val destinoPagina = paginaPdf
-                                                scope.launch { pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(doc.archivo, destinoPagina) } }
-                                            }) { Text("Siguiente") }
-                                            OutlinedButton(enabled = !busy, onClick = {
+                                        OutlinedButton(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            onClick = { startActivity(PdfViewActivity.intent(this@MainActivity, doc.archivo)) }
+                                        ) { Text("Abrir en PDF View") }
+                                        OutlinedButton(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            enabled = !busy,
+                                            onClick = {
                                                 scope.launch {
                                                     busy = true
                                                     try {
-                                                        val editado = withContext(Dispatchers.IO) { GestorDocumentos.rotarPaginaPdf(this@MainActivity, doc.archivo, paginaPdf) }
-                                                        documento = doc.copy(archivo = editado, nombre = editado.name)
-                                                        pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(editado, paginaPdf) }
-                                                        status = "Se giró la página ${paginaPdf + 1}; el contenido original se conservó."
-                                                    } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo girar la página." }
-                                                    finally { busy = false }
+                                                        val reconocido = OcrPdf.extraerTexto(doc.archivo) { pagina, total ->
+                                                            withContext(Dispatchers.Main) { status = "OCR local: página $pagina de $total…" }
+                                                        }
+                                                        if (reconocido.isBlank()) {
+                                                            status = "El OCR no encontró texto legible en este PDF."
+                                                        } else {
+                                                            textoEditado = reconocido
+                                                            documento = doc.copy(texto = reconocido)
+                                                            status = "OCR finalizado: texto extraído en este dispositivo."
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        status = e.localizedMessage ?: "No se pudo reconocer el texto del PDF."
+                                                    } finally { busy = false }
                                                 }
-                                            }) { Text("Girar página") }
+                                            }
+                                        ) { Text(if (busy) "Reconociendo texto…" else "Extraer texto con OCR") }
+                                        pdfPreview?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxWidth().heightIn(max = 420.dp)) }
+                                        Text("Página ${paginaPdf + 1} de ${doc.paginasPdf}. El PDF original conserva texto y gráficos al girar o agregar la marca.")
+                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            OutlinedButton(modifier = Modifier.weight(1f), enabled = paginaPdf > 0 && !busy, onClick = {
+                                                val destinoPagina = paginaPdf - 1
+                                                paginaPdf = destinoPagina
+                                                scope.launch { pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(doc.archivo, destinoPagina) } }
+                                            }) { Text("Anterior") }
+                                            OutlinedButton(modifier = Modifier.weight(1f), enabled = paginaPdf < doc.paginasPdf - 1 && !busy, onClick = {
+                                                val destinoPagina = paginaPdf + 1
+                                                paginaPdf = destinoPagina
+                                                scope.launch { pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(doc.archivo, destinoPagina) } }
+                                            }) { Text("Siguiente") }
                                         }
-                                        OutlinedButton(enabled = doc.paginasPdf > 1 && !busy, onClick = {
+                                        OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                                            scope.launch {
+                                                busy = true
+                                                try {
+                                                    val editado = withContext(Dispatchers.IO) { GestorDocumentos.rotarPaginaPdf(this@MainActivity, doc.archivo, paginaPdf) }
+                                                    documento = doc.copy(archivo = editado, nombre = editado.name)
+                                                    pdfPreview = withContext(Dispatchers.IO) { renderPdfPage(editado, paginaPdf) }
+                                                    status = "Se giró la página ${paginaPdf + 1}; el contenido original se conservó."
+                                                } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo girar la página." }
+                                                finally { busy = false }
+                                            }
+                                        }) { Text("Girar página") }
+                                        OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = doc.paginasPdf > 1 && !busy, onClick = {
                                             scope.launch {
                                                 busy = true
                                                 try {
@@ -418,8 +492,7 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }) { Text("Eliminar página actual") }
                                         OutlinedTextField(marcaPdf, { marcaPdf = it }, label = { Text("Texto de marca de agua") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Button(enabled = !busy && marcaPdf.isNotBlank(), onClick = {
+                                        Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && marcaPdf.isNotBlank(), onClick = {
                                                 scope.launch {
                                                     busy = true
                                                     try {
@@ -430,9 +503,8 @@ class MainActivity : ComponentActivity() {
                                                     } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo modificar el PDF." }
                                                     finally { busy = false }
                                                 }
-                                            }) { Text("Aplicar marca a todas las páginas") }
-                                            OutlinedButton(onClick = { exportar(doc.archivo, doc.nombre.substringBeforeLast('.', doc.nombre) + "_editado.pdf") }) { Text("Exportar PDF") }
-                                        }
+                                        }) { Text("Aplicar marca a todas las páginas") }
+                                        OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { exportar(doc.archivo, doc.nombre.substringBeforeLast('.', doc.nombre) + "_editado.pdf") }) { Text("Exportar PDF") }
                                         if (doc.texto != null) {
                                             Text("Texto extraído del PDF. Editarlo aquí crea un PDF nuevo de texto; no sustituye las letras dentro del diseño original.", style = MaterialTheme.typography.bodySmall)
                                             OutlinedTextField(
@@ -441,12 +513,12 @@ class MainActivity : ComponentActivity() {
                                                 modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp, max = 320.dp),
                                                 label = { Text("Texto extraído") }
                                             )
-                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                                OutlinedButton(onClick = {
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                OutlinedButton(modifier = Modifier.weight(1f), onClick = {
                                                     val f = GestorDocumentos.guardarTexto(this@MainActivity, doc.nombre, textoEditado)
                                                     exportar(f, "${doc.nombre.substringBeforeLast('.', doc.nombre)}_texto.txt")
                                                 }) { Text("Exportar texto TXT") }
-                                                Button(enabled = !busy, onClick = {
+                                                Button(modifier = Modifier.weight(1f), enabled = !busy, onClick = {
                                                     scope.launch {
                                                         busy = true
                                                         try {
@@ -466,20 +538,20 @@ class MainActivity : ComponentActivity() {
                                                 }) { Text("Crear PDF desde el texto") }
                                             }
                                         } else {
-                                            Text("No se extrajo texto seleccionable. Si es un escaneo, esta versión necesita OCR externo para convertirlo en texto.", style = MaterialTheme.typography.bodySmall)
+                                            Text("No se extrajo texto seleccionable. Probá «Extraer texto con OCR» para reconocer el escaneo.", style = MaterialTheme.typography.bodySmall)
                                         }
                                     }
                                     doc.imagen != null -> {
                                         Text("Editor de imagen · giro, espejo, recorte central, brillo, contraste y escala de grises")
                                         (imagenEditada ?: doc.imagen)?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxWidth().heightIn(max = 360.dp)) }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(enabled = !busy, onClick = {
+                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            OutlinedButton(modifier = Modifier.weight(1f), enabled = !busy, onClick = {
                                                 scope.launch { imagenEditada = withContext(Dispatchers.IO) { GestorDocumentos.rotar(imagenEditada ?: doc.imagen!!, 90f) } }
                                             }) { Text("Girar 90°") }
-                                            OutlinedButton(enabled = !busy, onClick = {
+                                            OutlinedButton(modifier = Modifier.weight(1f), enabled = !busy, onClick = {
                                                 scope.launch { imagenEditada = withContext(Dispatchers.IO) { GestorDocumentos.voltear(imagenEditada ?: doc.imagen!!, true) } }
                                             }) { Text("Espejo") }
-                                            OutlinedButton(enabled = !busy, onClick = {
+                                            OutlinedButton(modifier = Modifier.weight(1f), enabled = !busy, onClick = {
                                                 scope.launch { imagenEditada = withContext(Dispatchers.IO) { GestorDocumentos.recortarCentro(imagenEditada ?: doc.imagen!!, recorteImagen) } }
                                             }) { Text("Recortar") }
                                         }
@@ -553,52 +625,46 @@ class MainActivity : ComponentActivity() {
                     }
                     }
 
-                    if (seccion == SeccionApp.ETIQUETAS) {
-                    ElevatedCard(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Diseñá e imprimí etiquetas", style = MaterialTheme.typography.titleLarge)
-                            Text("Definí medidas, distribución y contenido. La vista previa refleja el tamaño físico configurado.", style = MaterialTheme.typography.bodyMedium)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                FilterChip(selected = !layout.individual, onClick = { layout = layout.copy(individual = false) }, label = { Text("Varias por hoja") })
-                                FilterChip(selected = layout.individual, onClick = { layout = layout.copy(individual = true) }, label = { Text("Individual") })
+                    if (seccion == SeccionApp.PDF) {
+                        ElevatedCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("PDF View", style = MaterialTheme.typography.titleLarge)
+                                Text("Abrí un PDF para verlo a página completa, compartirlo o enviarlo directo a la impresora.", style = MaterialTheme.typography.bodyMedium)
+                                Button(
+                                    enabled = !busy,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = {
+                                        pickerDesdePdf = true
+                                        picker.launch(arrayOf("*/*"))
+                                    }
+                                ) { Text(if (busy) "Abriendo…" else "Buscar PDF, Word, texto o imagen") }
                             }
-                            NumberField("Ancho etiqueta (mm)", layout.labelWidthMm) { layout = layout.copy(labelWidthMm = it) }
-                            NumberField("Alto etiqueta (mm)", layout.labelHeightMm) { layout = layout.copy(labelHeightMm = it) }
-                            if (!layout.individual) {
-                                NumberField("Columnas", layout.columns.toFloat(), true) { layout = layout.copy(columns = it.toInt().coerceIn(1,6)) }
-                                NumberField("Filas", layout.rows.toFloat(), true) { layout = layout.copy(rows = it.toInt().coerceIn(1,12)) }
-                                NumberField("Margen (mm)", layout.marginMm) { layout = layout.copy(marginMm = it) }
-                                NumberField("Separación X (mm)", layout.gapXmm) { layout = layout.copy(gapXmm = it) }
-                                NumberField("Separación Y (mm)", layout.gapYmm) { layout = layout.copy(gapYmm = it) }
-                            }
-                            OutlinedTextField(layout.productName, { layout = layout.copy(productName = it) }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(layout.price, { layout = layout.copy(price = it) }, label = { Text("Precio") }, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(layout.barcode, { layout = layout.copy(barcode = it) }, label = { Text("Código") }, modifier = Modifier.fillMaxWidth())
-                            Row { Checkbox(layout.showName, { layout = layout.copy(showName = it) }); Text("Nombre") }
-                            Row { Checkbox(layout.showPrice, { layout = layout.copy(showPrice = it) }); Text("Precio") }
-                            Row { Checkbox(layout.showBarcode, { layout = layout.copy(showBarcode = it) }); Text("Código") }
-                            EditorEtiquetaCanvas(state = editor, anchoMm = layout.labelWidthMm, altoMm = layout.labelHeightMm, onChange = { editor = it })
-                            Button(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
-                                scope.launch {
-                                    busy = true
-                                    try {
-                                        val pdf = withContext(Dispatchers.IO) { LabelPdfGenerator.create(this@MainActivity, layout, editor) }
-                                        val printer = destino
-                                        if (printer != null && (printer.puedeImprimirPdfPorIpp || printer.esEpsonL4150)) {
-                                            status = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirPdf(printer, pdf) }
-                                        } else if (servicioHabilitado) {
-                                            printPdf(pdf); status = "PDF preparado en el selector de impresión Android."
-                                        } else {
-                                            status = "No envié las etiquetas: configura IPP/PDF o Epson L4150 ESC/P-R directo, o activa MARJHO en ajustes de impresión Android."
+                        }
+                        ElevatedCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("Abiertos recientemente", style = MaterialTheme.typography.titleMedium)
+                                if (recientes.isEmpty()) {
+                                    Text("Los documentos que abras aparecerán aquí.", style = MaterialTheme.typography.bodyMedium)
+                                } else {
+                                    recientes.forEach { reciente ->
+                                        OutlinedButton(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            enabled = !busy,
+                                            onClick = { abrirReciente(reciente) }
+                                        ) {
+                                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                Text(reciente.nombre, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                                                Text(
+                                                    if (reciente.extension == "pdf") "PDF · Abrir en PDF View" else reciente.extension.uppercase().ifBlank { "Archivo" },
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
+                                            }
                                         }
-                                    } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo generar el PDF." }
-                                    finally { busy = false }
+                                    }
                                 }
-                            }) { Text(if (busy) "Preparando etiqueta…" else "Generar e imprimir etiquetas") }
+                            }
                         }
                     }
-                    }
-
                     if (seccion == SeccionApp.AJUSTES) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -890,12 +956,6 @@ class MainActivity : ComponentActivity() {
         return parts.size == 4 && parts.all { part ->
             part.isNotEmpty() && part.length <= 3 && part.all(Char::isDigit) && (part.toIntOrNull() ?: -1) in 0..255
         }
-    }
-
-    @Composable
-    private fun NumberField(label: String, value: Float, integer: Boolean = false, change: (Float) -> Unit) {
-        var text by remember(value) { mutableStateOf(if (integer) value.toInt().toString() else value.toString()) }
-        OutlinedTextField(text, { text = it; it.replace(',', '.').toFloatOrNull()?.let(change) }, label = { Text(label) }, singleLine = true, modifier = Modifier.fillMaxWidth())
     }
 
     companion object { const val KEY_IP = "printer_ip" }

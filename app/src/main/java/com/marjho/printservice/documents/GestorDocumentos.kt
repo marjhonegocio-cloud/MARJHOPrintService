@@ -47,30 +47,77 @@ data class DocumentoAbierto(
     val paginasPdf: Int = 0
 )
 
+data class DocumentoReciente(
+    val archivo: File,
+    val nombre: String,
+    val extension: String,
+    val modificado: Long
+)
+
 object GestorDocumentos {
-    fun importar(context: Context, uri: Uri): DocumentoAbierto {
+    fun importar(context: Context, uri: Uri, leerTextoPdf: Boolean = true): DocumentoAbierto {
         val resolver = context.contentResolver
         val mime = resolver.getType(uri) ?: "application/octet-stream"
-        val nombre = queryName(context, uri) ?: "documento"
+        val nombreOriginal = queryName(context, uri) ?: "documento"
+        val nombre = if (mime == "application/pdf" && !nombreOriginal.endsWith(".pdf", true)) "$nombreOriginal.pdf" else nombreOriginal
         val ext = nombre.substringAfterLast('.', "").lowercase()
-        val nombreSeguro = nombre.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifBlank { "documento" }
-        val destino = File(context.cacheDir, "marjho_${System.currentTimeMillis()}_$nombreSeguro")
+        val nombreSeguro = nombre.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").take(120).ifBlank { "documento" }
+        val destino = File(directorioRecientes(context), "${System.currentTimeMillis()}_${System.nanoTime()}__$nombreSeguro")
+        destino.parentFile?.mkdirs()
         try {
             resolver.openInputStream(uri).use { input ->
                 requireNotNull(input) { "No se pudo abrir el archivo." }
                 FileOutputStream(destino).use { output -> copiarConLimite(input, output, MAX_FILE_BYTES) }
             }
+            val documento = clasificar(context, destino, nombre, mime, leerTextoPdf)
+            limitarRecientes(context)
+            return documento
         } catch (e: Exception) {
             destino.delete()
             throw e
         }
+    }
 
+    fun listarRecientes(context: Context): List<DocumentoReciente> = directorioRecientes(context)
+        .listFiles()
+        .orEmpty()
+        .asSequence()
+        .filter { it.isFile && "__" in it.name }
+        .sortedByDescending(File::lastModified)
+        .take(MAX_RECENT_FILES)
+        .map { archivo ->
+            val nombre = archivo.name.substringAfter("__")
+            DocumentoReciente(archivo, nombre, nombre.substringAfterLast('.', "").lowercase(), archivo.lastModified())
+        }
+        .toList()
+
+    fun abrirReciente(context: Context, archivo: File): DocumentoAbierto {
+        val directorio = directorioRecientes(context).canonicalFile
+        val seguro = archivo.canonicalFile
+        require(seguro.isFile && seguro.parentFile == directorio && "__" in seguro.name) {
+            "El archivo reciente ya no está disponible. Volvé a seleccionarlo."
+        }
+        val nombre = seguro.name.substringAfter("__")
+        val extension = nombre.substringAfterLast('.', "").lowercase()
+        return clasificar(context, seguro, nombre, mimePorExtension(extension))
+    }
+
+    private fun clasificar(
+        context: Context,
+        destino: File,
+        nombre: String,
+        mime: String,
+        leerTextoPdf: Boolean = true
+    ): DocumentoAbierto {
+        val ext = nombre.substringAfterLast('.', "").lowercase()
         return when {
             ext == "pdf" || mime == "application/pdf" || esPdf(destino) -> {
                 val pages = ParcelFileDescriptor.open(destino, ParcelFileDescriptor.MODE_READ_ONLY).use {
                     PdfRenderer(it).use { renderer -> renderer.pageCount }
                 }
-                val texto = runCatching { extraerTextoPdf(context, destino).take(500_000).takeIf(String::isNotBlank) }.getOrNull()
+                val texto = if (leerTextoPdf) {
+                    runCatching { extraerTextoPdf(context, destino).take(500_000).takeIf(String::isNotBlank) }.getOrNull()
+                } else null
                 DocumentoAbierto(nombre, "pdf", "application/pdf", destino, texto = texto, paginasPdf = pages)
             }
             ext == "docx" || mime == DOCX_MIME -> DocumentoAbierto(
@@ -99,6 +146,33 @@ object GestorDocumentos {
             )
             else -> DocumentoAbierto(nombre, ext, mime, destino)
         }
+    }
+
+    private fun directorioRecientes(context: Context) = File(context.filesDir, "recent_documents")
+
+    private fun limitarRecientes(context: Context) {
+        val archivos = directorioRecientes(context).listFiles().orEmpty()
+            .filter { it.isFile && "__" in it.name }
+            .sortedByDescending(File::lastModified)
+        var total = 0L
+        archivos.forEachIndexed { index, archivo ->
+            total += archivo.length()
+            if (index >= MAX_RECENT_FILES || total > MAX_RECENT_BYTES) {
+                total -= archivo.length()
+                archivo.delete()
+            }
+        }
+    }
+
+    private fun mimePorExtension(extension: String): String = when (extension) {
+        "pdf" -> "application/pdf"
+        "docx" -> DOCX_MIME
+        "txt", "md", "csv", "log" -> "text/plain"
+        "jpg", "jpeg" -> "image/jpeg"
+        "png" -> "image/png"
+        "webp" -> "image/webp"
+        "bmp" -> "image/bmp"
+        else -> "application/octet-stream"
     }
 
     fun guardarTexto(context: Context, nombre: String, texto: String, extension: String = "txt"): File {
@@ -462,6 +536,8 @@ object GestorDocumentos {
     private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     private const val MAX_FILE_BYTES = 40L * 1024 * 1024
     private const val MAX_TEXT_BYTES = 2L * 1024 * 1024
+    private const val MAX_RECENT_FILES = 12
+    private const val MAX_RECENT_BYTES = 160L * 1024 * 1024
     private val TEXT_MIMES = setOf("application/json", "application/xml", "text/xml", "application/javascript", "application/x-yaml", "application/yaml", "application/sql")
     private val TEXT_EXTENSIONS = setOf(
         "txt", "md", "markdown", "rst", "org", "csv", "tsv", "json", "json5", "jsonl", "xml", "xsd", "xsl", "xslt", "html", "htm", "css", "scss", "less",

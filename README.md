@@ -1,4 +1,4 @@
-# MARJHO Print Service 1.2.0
+# MARJHO Print Service 1.3.0
 
 Complemento Android independiente basado en `android.printservice.PrintService`.
 Su objetivo es aparecer en el selector de impresión del sistema Android y recibir documentos PDF de otras aplicaciones.
@@ -9,12 +9,15 @@ Su objetivo es aparecer en el selector de impresión del sistema Android y recib
 - Descubrimiento DNS-SD/mDNS automático y consulta IPP/IPPS para determinar formatos y capacidades anunciados.
 - Envío de PDF por IPP solo cuando `application/pdf` aparece entre los formatos admitidos.
 - Flujo ESC/P-R existente para Epson L4150 configurada de forma explícita; no se infiere por el puerto TCP.
+- Actividad independiente **PDF View** para abrir PDF desde «Abrir con», pasar páginas con gestos, compartir y enviar directamente a la impresora configurada.
+- Pantalla PDF con selector de documentos y lista privada de archivos recientes.
+- OCR local de documentos escaneados con ML Kit; el PDF se procesa en el teléfono.
 - Editor PDF con vista por página, giro, eliminación de páginas, marca de agua y extracción de texto; editor DOCX básico y texto plano; conversión texto-PDF e imagen.
 - Exportación mediante el selector de documentos Android; no requiere nube ni Firebase.
 - Límite conservado del controlador ESC/P-R: hasta 20 páginas A4 por trabajo.
-- Interfaz dividida en cuatro pantallas: Red, Archivos, Etiquetas y Ajustes. La IP manual y las opciones de Epson se abren como diálogos.
+- Interfaz dividida en cuatro pantallas: Red, Archivos, PDF y Ajustes. La IP manual y las opciones de Epson se abren como diálogos.
 
-El detalle actualizado y los límites de cada formato están en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md). Las secciones de etapas 1–3 que siguen documentan el historial y algunas limitaciones ya resueltas.
+El detalle actualizado y los límites de cada formato están en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md). La etapa 3 conserva el historial de la primera integración.
 
 ## Importante: Epson L4150
 
@@ -47,7 +50,7 @@ APK esperado:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-La iteración de interfaz se compiló con `:app:assembleDebug`, se instaló y se abrió en el Xiaomi conectado; se verificó visualmente la pantalla Red con la Epson L4150 detectada y la navegación de cuatro secciones. El flujo Epson L4150 por ESC/P-R ya se probó desde el Xiaomi y el usuario confirmó que salió la hoja. Los editores de documentos todavía requieren validación con archivos representativos antes de distribuir un APK.
+La versión 1.3.0 se compiló en Android Studio y se instaló en el Xiaomi conectado. Se verificó en el dispositivo la actividad **PDF View** abriendo un PDF por `ACTION_VIEW` con URI autorizado, la vista de dos páginas, el gesto para avanzar página, la reaparición de controles y el panel del sistema para compartir. La ruta ESC/P-R de una página de prueba ya se imprimió físicamente en la Epson L4150 y el usuario confirmó la salida; la acción de imprimir desde el visor usa el envío directo IPP/ESC/P-R, aunque no se repitió una impresión física desde ese botón en esta iteración. El OCR compila integrado; queda verificar el texto extraído con un escaneo representativo antes de distribuir un APK.
 
 ## Instalar y configurar
 
@@ -69,7 +72,7 @@ El teléfono y la impresora deben poder comunicarse en la red local. En Wi-Fi Di
 - El servicio recibe PDF. Aplicaciones que no utilicen el framework de impresión Android no aparecerán automáticamente.
 - Ethernet físico no es posible en la L4150 sin hardware adicional porque el modelo no tiene puerto RJ-45.
 - La cancelación de un trabajo durante la transmisión no garantiza que la impresora pueda retirar páginas ya recibidas.
-- PDF escaneado requiere OCR, y la edición de texto extraído genera un PDF nuevo en vez de reemplazar texto dentro del diseño original.
+- OCR extrae texto de páginas escaneadas, pero no crea una capa buscable dentro del PDF; el texto se exporta por separado.
 - DOCX permite cambiar texto de párrafos y guardar una copia del paquete, pero exige conservar la cantidad de párrafos y no ofrece maquetación fiel, encabezados/pies ni edición visual de tablas.
 - Los archivos de texto editables admiten hasta 2 MB y se exportan como UTF-8. PDF/DOCX e imágenes tienen límite de importación de 40 MB.
 - La app reconoce extensiones comunes de texto/código, aunque no aplica resaltado de sintaxis; RTF/HTML se manejan como texto fuente y no se renderizan.
@@ -111,14 +114,7 @@ MarjhoPrintService (PrintService)
 
 Los archivos ESC/P-R reutilizados conservan sus comentarios originales. El codificador indica que toma como referencia el proyecto abierto `python-epson` (Jason S. McMullan, MIT, 2016), y aclara que no es un SDK oficial de Epson. Antes de distribuir comercialmente el APK, revisar el texto de licencia y las obligaciones de atribución del código de referencia original.
 
-Las nuevas dependencias se documentan en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md): `ipp-client-kotlin` (MIT) y `PdfBox-Android` (Apache-2.0).
-
-## Etapa 2 — Editor de etiquetas y vista previa
-
-Se agregó un editor visual independiente con Compose. Permite mover nombre, precio y código sobre la etiqueta, cambiar tamaños, alternar campos, elegir hoja con múltiples etiquetas o etiqueta individual, configurar ancho/alto en mm, filas, columnas, márgenes y separaciones. Genera un PDF y abre el diálogo nativo de impresión Android.
-
-**Limitación de esta etapa:** la L4150 continúa usando raster ESC/P-R A4 a 360 dpi. La etiqueta individual se centra en una hoja A4 portadora. Los tamaños físicos A5/Carta/Legal y rollos no se deben considerar compatibles hasta adaptar el protocolo y probarlos con papel real. Ver `docs/ETAPA_2_EDITOR_Y_FORMATOS.md`.
-
+Las dependencias de impresión, PDF y OCR se documentan en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md), con sus licencias y límites.
 
 ## Etapa 3 — Red local y documentos (primera integración)
 
@@ -132,7 +128,7 @@ Se reorganizó la pantalla en secciones y se añadieron:
 - Extracción del texto visible de DOCX para editarlo como borrador y guardarlo como TXT.
 - Edición básica de imagen: rotar 90 grados y guardar PNG.
 - Conversión de imagen a PDF A4 para imprimir.
-- Se conserva el editor de etiquetas y el PrintService del sistema.
+- El editor de etiquetas de esta etapa histórica se retiró en la versión 1.3; el PrintService Android se conserva.
 
 ### Límites explícitos de esta etapa
 - La extracción DOCX no reescribe el DOCX original ni conserva tablas, estilos, encabezados o imágenes; se exporta el texto editado como TXT.

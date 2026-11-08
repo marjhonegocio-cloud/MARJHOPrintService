@@ -33,7 +33,7 @@ class EscprRasterCodec(salida: OutputStream) {
 
     data class TamanoImprimible(val ancho: Int, val alto: Int, val margen: Int)
 
-    fun iniciarTrabajo(nombre: String = "MARJHO-ETIQUETAS"): TamanoImprimible {
+    fun iniciarTrabajo(nombre: String = "MARJHO-PRINT"): TamanoImprimible {
         check(!iniciado) { "El trabajo ya empezó" }
         iniciado = true
         // Secuencia EJL para abandonar packet mode y preparar ESC/P-R.

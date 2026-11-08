@@ -4,11 +4,11 @@ Esta etapa amplía el servicio Android, la selección de impresoras y las herram
 
 ## Organización de la interfaz
 
-La pantalla principal se distribuye en cuatro destinos inferiores: **Red**, **Archivos**, **Etiquetas** y **Ajustes**. Cada destino muestra solo las acciones de esa tarea; el encabezado indica dónde está la persona y el indicador de actividad aparece mientras la app trabaja. Configurar una IP y cambiar opciones de la Epson son diálogos puntuales, para dejar la pantalla de red enfocada en el estado y la búsqueda de impresoras. Al importar un archivo, la app abre directamente la sección Archivos.
+La pantalla principal se distribuye en cuatro destinos inferiores: **Red**, **Archivos**, **PDF** y **Ajustes**. La sección PDF contiene el selector y la lista de documentos recientes; Archivos mantiene las herramientas de texto, Word e imagen. Configurar una IP y cambiar opciones de la Epson son diálogos puntuales. El editor de etiquetas y sus archivos se retiraron en la versión 1.3.
 
 En teléfonos, la navegación inferior sigue el patrón de Material 3 para un máximo de cinco destinos compactos. Los diálogos se reservan para decisiones/configuración breves; el contenido de cada editor queda en su propia pantalla desplazable. La librería Material 3 Adaptive ofrece navegación para ventanas grandes, pero esta iteración está enfocada en teléfono; una adaptación a tablet o ventana ancha debería usar carril de navegación y paneles según el ancho disponible.
 
-Referencias de diseño Android: [Material 3 para Compose](https://developer.android.com/develop/ui/compose/designsystems/material3), [Material 3 Adaptive](https://developer.android.com/jetpack/androidx/releases/compose-material3-adaptive) y [diálogos Compose](https://developer.android.com/develop/ui/compose/components/dialog).
+Referencias de diseño Android: [Material 3 para Compose](https://developer.android.com/develop/ui/compose/designsystems/material3), [Material 3 Adaptive](https://developer.android.com/jetpack/androidx/releases/compose-material3-adaptive) y [diálogos Compose](https://developer.android.com/develop/ui/compose/components/dialog). OCR: [ML Kit Text Recognition v2 para Android](https://developers.google.com/ml-kit/vision/text-recognition/v2/android).
 
 ## Detección y envío de trabajos
 
@@ -32,11 +32,16 @@ Referencias de diseño Android: [Material 3 para Compose](https://developer.andr
 | Epson L4150 configurada | Raster ESC/P-R por TCP 9100, seleccionable desde la app | Límite de 20 páginas A4; el cierre TCP confirma transmisión, no salida física |
 | LPR, RAW o IPP sin PDF | Sin controlador directo confirmado | Abrir el selector de impresión Android o el complemento del fabricante |
 
-## PDF, Word y texto
+## PDF View, documentos, Word y texto
 
-- PDF: muestra una página a la vez, permite avanzar/retroceder, girar o eliminar la página actual, aplicar marca de agua a todas las páginas y exportar una copia.
+- Android registra una actividad con nombre **PDF View** para `ACTION_VIEW` y MIME `application/pdf`. Desde un gestor de archivos se puede elegir «Abrir con → PDF View»; esa actividad muestra solo el PDF y no inicia la pantalla principal.
+- El visor muestra una página por vez; los gestos horizontales avanzan o retroceden. Dos botones flotantes permiten compartir el archivo y enviarlo directamente al destino IPP/PDF o Epson L4150 guardado. Los controles se atenúan solos y aparecen al tocar la pantalla.
+- La impresión desde PDF View usa IPP o ESC/P-R directamente y no abre el selector/diálogo Android. Si no hay un destino directo compatible guardado, indica que hay que configurarlo en Red.
+- La pantalla PDF ofrece el selector para PDF, Word, texto e imagen y una lista privada de hasta 12 documentos recientes, con un máximo de 160 MB en el almacenamiento interno de la app.
+- En Archivos, PDF conserva herramientas de trabajo: muestra una página a la vez, permite avanzar/retroceder, girar o eliminar la página actual, aplicar marca de agua a todas las páginas y exportar una copia.
 - La eliminación y el giro modifican una copia de trabajo en caché. El archivo elegido en el selector no se sobrescribe; la persona elige dónde guardar la copia.
-- Se extrae texto seleccionable de PDF para exportar a TXT o crear un PDF nuevo de texto corrido. Esa edición no sustituye caracteres dentro del diseño de origen. Los escaneos necesitan OCR, que todavía no está integrado.
+- Se extrae texto seleccionable de PDF para exportar a TXT o crear un PDF nuevo de texto corrido. El botón **Extraer texto con OCR** también renderiza y reconoce página por página documentos escaneados.
+- El OCR usa el modelo latino de ML Kit Text Recognition, incluido en la app. Funciona en el dispositivo, reconoce alfabetos latinos como español y no envía el documento a un servicio web; añade cerca de 4 MB al APK. El resultado es texto editable para exportar, no una capa buscable añadida al PDF original.
 - DOCX: el editor modifica texto de párrafos en `word/document.xml` (también los párrafos dentro de celdas de tablas) y escribe otra copia conservando los demás archivos del paquete, como imágenes y relaciones. La edición DOCX exige la misma cantidad de párrafos. El texto se reparte entre los segmentos de texto que ya tenía cada párrafo; no hay vista de página fiel a Word ni edición de encabezados, pies, notas, campos o paginación. Para conservar el aspecto original, usar una aplicación de oficina y enviar su salida PDF al selector de impresión Android.
 - Los archivos `.doc` binarios antiguos no se editan dentro de MARJHO. Convertirlos a `.docx` o PDF con otra aplicación.
 - El selector permite elegir archivos de cualquier tipo; MARJHO reconoce PDF, DOCX, imágenes y texto UTF-8 o UTF-16 con BOM. Para texto plano, detecta también extensiones comunes de programación y configuración (`.md`, `.csv`, `.json`, `.xml`, `.yaml`, `.ini`, `.properties`, `.sql`, `.js`, `.ts`, `.java`, `.kt`, `.py`, `.c`, `.cpp`, `.html`, `.css`, `.sh`, `.ps1`, entre otras). Si no reconoce un formato binario, informa que no tiene editor.
@@ -54,6 +59,7 @@ La importación acepta archivos con MIME `image/*` que el decodificador de la ve
 
 - [`gmuth/ipp-client-kotlin`](https://github.com/gmuth/ipp-client-kotlin): cliente Kotlin/Java para IPP, basado en RFC 8010/8011; el proyecto documenta consulta de `document-format-supported` e impresión PDF. MIT. Se usa como dependencia Maven `de.gmuth:ipp-client:3.5.1`.
 - [`TomRoush/PdfBox-Android`](https://github.com/TomRoush/PdfBox-Android): adaptación de Apache PDFBox para Android, Apache-2.0. Se usa como `com.tom-roush:pdfbox-android:2.0.27.0`.
+- [ML Kit Text Recognition v2](https://developers.google.com/ml-kit/vision/text-recognition/v2/android): OCR en el dispositivo; se empaqueta el modelo latino como `com.google.mlkit:text-recognition:16.0.1`, de modo que no depende de descargar el modelo ni subir documentos a un servicio remoto.
 - [`Tosin-JD/TDoc`](https://github.com/Tosin-JD/TDoc): proyecto Android de investigación para extraer estructura/formato de DOCX y ODT. Su README usa Apache POI y odfdom y declara GPL-3.0; se revisó, pero no se integró porque supondría añadir varias dependencias y obligaciones de licencia. MARJHO mantiene el editor DOCX de texto acotado descrito arriba.
 - Android recomienda Storage Access Framework (`ACTION_OPEN_DOCUMENT`) para permitir que la persona elija documentos desde almacenamiento local o proveedores instalados; el editor usa ese selector y solicita cualquier MIME para poder clasificar extensiones que los proveedores etiquetan como `application/octet-stream`.
 - Epson publica sus controladores ESC/P-R para Linux como controladores GPL, no como una API Android lista para usar. El flujo Android de este proyecto es un perfil raster experimental para la L4150 y requiere validación física.

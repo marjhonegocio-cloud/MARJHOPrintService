@@ -10,7 +10,7 @@ INCLUIDO EN ESTA ENTREGA
 - Rotación de imágenes y guardado PNG.
 - Conversión de imagen a PDF A4.
 - Envío directo ESC/P-R de PDF compatible a IP seleccionada.
-- Editor de etiquetas conservado.
+- El editor de etiquetas pertenecía a esa iteración histórica y se retiró en la versión 1.3.
 - Servicio PrintService Android conservado.
 
 NO INCLUIDO TODAVÍA

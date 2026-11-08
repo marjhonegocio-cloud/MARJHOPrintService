@@ -61,7 +61,7 @@ object ImpresorEscprDirecto {
         comprobarCancelacion: () -> Unit = {}
     ): String {
         validarIp(ip)
-        require(pdf.isFile && pdf.length() > 0L) { "No se encontro el PDF de etiquetas." }
+        require(pdf.isFile && pdf.length() > 0L) { "No se encontró un PDF válido para imprimir." }
 
         ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
             PdfRenderer(descriptor).use { renderer ->
