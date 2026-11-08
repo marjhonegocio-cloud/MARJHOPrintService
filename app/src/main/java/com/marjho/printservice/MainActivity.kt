@@ -603,8 +603,13 @@ class MainActivity : ComponentActivity() {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("4. Servicio Android", style = MaterialTheme.typography.titleLarge)
-                            Text(if (servicioHabilitado) "MARJHO está listo para recibir trabajos desde otras aplicaciones." else "MARJHO está desactivado para trabajos enviados desde otras aplicaciones.")
-                            Text("También podés activar MARJHO para recibir trabajos enviados desde otras aplicaciones.")
+                            Text(
+                                if (servicioHabilitado) {
+                                    "El servicio de impresión de Android está activado y puede recibir trabajos de otras aplicaciones."
+                                } else {
+                                    "El servicio de impresión de Android está desactivado. Activá MARJHO para recibir trabajos de otras aplicaciones."
+                                }
+                            )
                             OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { ajustesImpresion.launch(Intent(Settings.ACTION_PRINT_SETTINGS)) }) {
                                 Text("Abrir ajustes de impresión Android")
                             }
