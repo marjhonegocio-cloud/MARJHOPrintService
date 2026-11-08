@@ -19,13 +19,21 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
 import com.marjho.printservice.documents.DocumentoAbierto
 import com.marjho.printservice.documents.GestorDocumentos
@@ -43,9 +51,66 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
 
+private enum class SeccionApp(val titulo: String, val etiqueta: String) {
+    IMPRESORA("Impresora", "Red"),
+    ARCHIVOS("Documentos", "Archivos"),
+    ETIQUETAS("Etiquetas", "Etiquetas"),
+    AJUSTES("Ajustes", "Ajustes")
+}
+
+@Composable
+private fun IconoSeccion(seccion: SeccionApp, seleccionado: Boolean) {
+    val color = if (seleccionado) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    Canvas(Modifier.size(24.dp)) {
+        val sx = size.width / 24f
+        val sy = size.height / 24f
+        val linea = Stroke(width = 1.8f * sx, cap = StrokeCap.Round)
+        fun punto(x: Float, y: Float) = Offset(x * sx, y * sy)
+        when (seccion) {
+            SeccionApp.IMPRESORA -> {
+                drawRoundRect(color, punto(3f, 8f), Size(18f * sx, 10f * sy), CornerRadius(2f * sx), style = linea)
+                drawRect(color, punto(7f, 3f), Size(10f * sx, 7f * sy), style = linea)
+                drawRect(color, punto(7f, 14f), Size(10f * sx, 7f * sy), style = linea)
+                drawLine(color, punto(9f, 17f), punto(15f, 17f), linea.width)
+                drawCircle(color, 1f * sx, punto(18f, 11f))
+            }
+            SeccionApp.ARCHIVOS -> {
+                val hoja = Path().apply {
+                    moveTo(6f * sx, 2.5f * sy); lineTo(14f * sx, 2.5f * sy); lineTo(19f * sx, 7.5f * sy)
+                    lineTo(19f * sx, 21.5f * sy); lineTo(6f * sx, 21.5f * sy); close()
+                }
+                drawPath(hoja, color, style = linea)
+                drawLine(color, punto(14f, 3f), punto(14f, 8f), linea.width)
+                drawLine(color, punto(14f, 8f), punto(19f, 8f), linea.width)
+                drawLine(color, punto(9f, 12f), punto(16f, 12f), linea.width)
+                drawLine(color, punto(9f, 16f), punto(16f, 16f), linea.width)
+            }
+            SeccionApp.ETIQUETAS -> {
+                val etiqueta = Path().apply {
+                    moveTo(4f * sx, 4f * sy); lineTo(15f * sx, 4f * sy); lineTo(21f * sx, 10f * sy)
+                    lineTo(12f * sx, 20f * sy); lineTo(4f * sx, 12f * sy); close()
+                }
+                drawPath(etiqueta, color, style = linea)
+                drawCircle(color, 1.1f * sx, punto(9f, 9f), style = linea)
+            }
+            SeccionApp.AJUSTES -> {
+                drawCircle(color, 6f * sx, punto(12f, 12f), style = linea)
+                drawCircle(color, 2f * sx, punto(12f, 12f), style = linea)
+                for (angulo in 0 until 8) {
+                    val radians = Math.toRadians((angulo * 45).toDouble())
+                    val desde = punto(12f + kotlin.math.cos(radians).toFloat() * 8f, 12f + kotlin.math.sin(radians).toFloat() * 8f)
+                    val hasta = punto(12f + kotlin.math.cos(radians).toFloat() * 10f, 12f + kotlin.math.sin(radians).toFloat() * 10f)
+                    drawLine(color, desde, hasta, linea.width)
+                }
+            }
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("marjho_print_local", MODE_PRIVATE) }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -58,6 +123,9 @@ class MainActivity : ComponentActivity() {
                 var popup by remember { mutableStateOf(false) }
                 var buscando by remember { mutableStateOf(false) }
                 var busquedaAutomatica by remember { mutableStateOf(true) }
+                var seccion by remember { mutableStateOf(SeccionApp.IMPRESORA) }
+                var configIpPopup by remember { mutableStateOf(false) }
+                var perfilPopup by remember { mutableStateOf(false) }
                 var busy by remember { mutableStateOf(false) }
                 var servicioHabilitado by remember { mutableStateOf(isMarjhoPrintServiceEnabled()) }
                 var documento by remember { mutableStateOf<DocumentoAbierto?>(null) }
@@ -73,7 +141,6 @@ class MainActivity : ComponentActivity() {
                 var formatoImagen by remember { mutableStateOf("PNG") }
                 var menuFormatoImagen by remember { mutableStateOf(false) }
                 var archivoParaExportar by remember { mutableStateOf<File?>(null) }
-                var editorEtiquetas by remember { mutableStateOf(false) }
                 var layout by remember { mutableStateOf(LabelLayout()) }
                 var editor by remember { mutableStateOf(EditorEtiquetaState()) }
                 val scope = rememberCoroutineScope()
@@ -106,6 +173,7 @@ class MainActivity : ComponentActivity() {
                             try {
                                 val loaded = withContext(Dispatchers.IO) { GestorDocumentos.importar(this@MainActivity, uri) }
                                 documento = loaded
+                                seccion = SeccionApp.ARCHIVOS
                                 textoEditado = loaded.texto.orEmpty()
                                 imagenEditada = loaded.imagen
                                 paginaPdf = 0
@@ -176,124 +244,68 @@ class MainActivity : ComponentActivity() {
                     exportador.launch(nombre)
                 }
 
-                Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text("MARJHO Print Service", style = MaterialTheme.typography.headlineSmall)
-                    Text("Impresión local · documentos · imágenes · etiquetas", style = MaterialTheme.typography.bodyMedium)
+                Scaffold(
+                    topBar = {
+                        CenterAlignedTopAppBar(
+                            title = { Text("MARJHO · ${seccion.titulo}") },
+                            actions = {
+                                if (busy) CircularProgressIndicator(Modifier.padding(end = 16.dp).size(22.dp), strokeWidth = 2.dp)
+                            }
+                        )
+                    },
+                    bottomBar = {
+                        NavigationBar {
+                            SeccionApp.values().forEach { destinoNav ->
+                                NavigationBarItem(
+                                    selected = seccion == destinoNav,
+                                    onClick = { seccion = destinoNav },
+                                    icon = { IconoSeccion(destinoNav, seccion == destinoNav) },
+                                    label = { Text(destinoNav.etiqueta) }
+                                )
+                            }
+                        }
+                    }
+                ) { insets ->
+                    Column(
+                        Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+                        ) {
+                            Text(status, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodySmall, maxLines = 3)
+                        }
 
+                    if (seccion == SeccionApp.IMPRESORA) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                            Text("1. Impresora de red", style = MaterialTheme.typography.titleLarge)
-                            Text(destino?.let { "Destino: ${it.nombre} · ${it.ip}\n${it.rutaDirecta}" } ?: "Sin impresora compatible seleccionada")
-                            Text(
-                                if (servicioHabilitado) "Servicio de impresión Android: habilitado"
-                                else "Servicio de impresión Android: deshabilitado (afecta trabajos enviados desde otras apps)."
-                            )
-                            if (!servicioHabilitado) {
-                                Text("La impresión directa ESC/P-R desde MARJHO no necesita activar este servicio.", style = MaterialTheme.typography.bodySmall)
-                            }
-                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
-                                ajustesImpresion.launch(Intent(Settings.ACTION_PRINT_SETTINGS))
-                            }) {
-                                Text(if (servicioHabilitado) "Abrir ajustes de impresión Android" else "Activar MARJHO para otras apps")
-                            }
+                            Text("Impresora de red", style = MaterialTheme.typography.titleLarge)
+                            destino?.let {
+                                Text(it.nombre, style = MaterialTheme.typography.titleMedium)
+                                Text("${it.ip} · ${it.rutaDirecta}", style = MaterialTheme.typography.bodyMedium)
+                            } ?: Text("Todavía no hay una impresora seleccionada. Buscá equipos en la red o configurá una IP.")
                             destino?.takeIf { it.esEpsonL4150 }?.let { perfil ->
-                                Text("Epson L4150 · ${if (perfil.forzarEscpr) "ESC/P-R directo" else if (perfil.puedeImprimirPdfPorIpp) "IPP PDF" else "ESC/P-R disponible"}")
-                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
-                                    val actualizado = perfil.copy(
-                                        forzarEscpr = !perfil.forzarEscpr,
-                                        rutaDirecta = if (!perfil.forzarEscpr) "ESC/P-R: TCP 9100 (directo seleccionado)"
-                                            else if (perfil.puedeImprimirPdfPorIpp) "IPP: PDF" else "ESC/P-R: TCP 9100"
-                                    )
-                                    actualizado.guardar(prefs)
-                                    destino = actualizado
-                                    status = if (actualizado.forzarEscpr) "ESC/P-R directo seleccionado para ${perfil.nombre}."
-                                        else "Se usará IPP si acepta PDF; ESC/P-R queda como alternativa para la L4150."
-                                }) {
-                                    Text(if (perfil.forzarEscpr) "Cambiar a IPP automático" else "Forzar ESC/P-R directo")
+                                Text("Perfil Epson L4150 · ${if (perfil.forzarEscpr) "ESC/P-R directo" else "IPP automático"}", style = MaterialTheme.typography.bodySmall)
+                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = { perfilPopup = true }) {
+                                    Text("Opciones y prueba Epson")
                                 }
-                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
-                                    busy = true
-                                    scope.launch {
-                                        try {
-                                            val pdf = withContext(Dispatchers.IO) {
-                                                textoToPdf(
-                                                    "PRUEBA DE IMPRESION DIRECTA\nMARJHO Print Service\nEpson L4150\nESC/P-R por TCP 9100\n${perfil.ip}",
-                                                    File(cacheDir, "marjho_prueba_escpr.pdf")
-                                                )
-                                            }
-                                            status = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirEscpr(perfil, pdf) }
-                                        } catch (e: Exception) {
-                                            status = e.localizedMessage ?: "No se pudo enviar la prueba ESC/P-R."
-                                        } finally { busy = false }
-                                    }
-                                }) { Text(if (busy) "Enviando prueba…" else "Imprimir una página de prueba ESC/P-R") }
                             }
-                            OutlinedTextField(ip, { ip = it }, label = { Text("Dirección IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(enabled = !buscando, onClick = {
+                                Button(modifier = Modifier.weight(1f), enabled = !buscando, onClick = {
                                     popup = true; buscando = true; status = "Buscando impresoras en la red…"
                                     busquedaAutomatica = false
                                     resultadosRecientes.set(emptyList())
                                     finder.buscar({ resultadosRecientes.set(it); impresoras = it }, { status = it; if (it.startsWith("Búsqueda terminada")) buscando = false })
-                                }) { Text(if (buscando) "Buscando…" else "Buscar impresoras") }
-                                OutlinedButton(onClick = {
-                                    if (validIp(ip)) {
-                                        prefs.edit().putString(KEY_IP, ip.trim()).apply()
-                                        DestinoImpresion.limpiar(prefs)
-                                        destino = null
-                                        seleccionada = null
-                                        status = "IP guardada. Se probará IPP al detectar; no se enviará ESC/P-R sin identificar el modelo."
-                                    } else status = "Ingresá una dirección IPv4 válida."
-                                }) { Text("Guardar IP") }
+                                }) { Text(if (buscando) "Buscando…" else "Buscar en la red") }
+                                OutlinedButton(modifier = Modifier.weight(1f), onClick = { configIpPopup = true }) { Text("Configurar por IP") }
                             }
-                            OutlinedButton(enabled = validIp(ip) && !busy, onClick = {
-                                status = "Consultando IPP y TCP 9100 en $ip…"
-                                scope.launch {
-                                    busy = true
-                                    try {
-                                        val reporte = withContext(Dispatchers.IO) { ProtocoloImpresion.analizarIp(ip.trim()) }
-                                        if (reporte.soportaPdf) {
-                                            val elegido = reporte.copy(impresora = reporte.impresora.copy(nombre = "Impresora ${ip.trim()}"))
-                                            elegido.comoDestino().guardar(prefs)
-                                            destino = elegido.comoDestino()
-                                        } else {
-                                            status = "${reporte.resumen()}\nLa conexión TCP no identifica por sí sola el lenguaje que entiende la impresora."
-                                        }
-                                        if (reporte.soportaPdf) status = reporte.resumen()
-                                    } catch (e: Exception) {
-                                        status = e.localizedMessage ?: "No se pudo consultar la impresora."
-                                    } finally { busy = false }
-                                }
-                            }) { Text(if (busy) "Consultando…" else "Detectar protocolo por IP") }
-                            OutlinedButton(enabled = validIp(ip) && !busy, onClick = {
-                                scope.launch {
-                                    busy = true
-                                    try {
-                                        val abre = withContext(Dispatchers.IO) { ProtocoloImpresion.puertoAbierto(ip.trim(), 9100, 1500) }
-                                        if (!abre) error("$ip no responde en TCP 9100.")
-                                        val manual = DestinoImpresion(
-                                            ip = ip.trim(), nombre = "Epson L4150", modelo = "Epson L4150",
-                                            protocolo = "ESC/P-R TCP 9100 (seleccionado manualmente)", uriIpp = null,
-                                            formatos = emptySet(), medios = setOf("iso_a4_210x297mm"), color = true,
-                                            resolucionesDpi = setOf(360),
-                                            duplex = false, puerto9100Abierto = true,
-                                            rutaDirecta = "ESC/P-R: TCP 9100 (directo seleccionado)", forzarEscpr = true
-                                        )
-                                        manual.guardar(prefs)
-                                        destino = manual
-                                        status = "Destino configurado como Epson L4150. La respuesta TCP no valida la impresión física."
-                                    } catch (e: Exception) {
-                                        status = e.localizedMessage ?: "No se pudo comprobar TCP 9100."
-                                    } finally { busy = false }
-                                }
-                            }) { Text("Configurar manualmente como Epson L4150") }
-                            Text("La detección automática usa DNS-SD/mDNS e IPP. Si una impresora no anuncia el servicio, ingresá la IP; no se deduce su lenguaje solo por ver abierto TCP 9100.", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                    }
 
+                    if (seccion == SeccionApp.ARCHIVOS) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                             Text("2. Documentos y archivos", style = MaterialTheme.typography.titleLarge)
@@ -539,64 +551,67 @@ class MainActivity : ComponentActivity() {
                             } ?: Text("Todavía no abriste ningún archivo.")
                         }
                     }
-
-                    ElevatedCard(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("3. Editor de etiquetas", style = MaterialTheme.typography.titleLarge)
-                            Text("El editor de etiquetas original se conserva como módulo. Abrilo para configurar medidas, diseño y contenido.")
-                            Button(onClick = { editorEtiquetas = !editorEtiquetas }) { Text(if (editorEtiquetas) "Ocultar editor" else "Mostrar editor de etiquetas") }
-                            if (editorEtiquetas) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FilterChip(selected = !layout.individual, onClick = { layout = layout.copy(individual = false) }, label = { Text("Varias por hoja") })
-                                    FilterChip(selected = layout.individual, onClick = { layout = layout.copy(individual = true) }, label = { Text("Individual") })
-                                }
-                                NumberField("Ancho etiqueta (mm)", layout.labelWidthMm) { layout = layout.copy(labelWidthMm = it) }
-                                NumberField("Alto etiqueta (mm)", layout.labelHeightMm) { layout = layout.copy(labelHeightMm = it) }
-                                if (!layout.individual) {
-                                    NumberField("Columnas", layout.columns.toFloat(), true) { layout = layout.copy(columns = it.toInt().coerceIn(1,6)) }
-                                    NumberField("Filas", layout.rows.toFloat(), true) { layout = layout.copy(rows = it.toInt().coerceIn(1,12)) }
-                                    NumberField("Margen (mm)", layout.marginMm) { layout = layout.copy(marginMm = it) }
-                                    NumberField("Separación X (mm)", layout.gapXmm) { layout = layout.copy(gapXmm = it) }
-                                    NumberField("Separación Y (mm)", layout.gapYmm) { layout = layout.copy(gapYmm = it) }
-                                }
-                                OutlinedTextField(layout.productName, { layout = layout.copy(productName = it) }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
-                                OutlinedTextField(layout.price, { layout = layout.copy(price = it) }, label = { Text("Precio") }, modifier = Modifier.fillMaxWidth())
-                                OutlinedTextField(layout.barcode, { layout = layout.copy(barcode = it) }, label = { Text("Código") }, modifier = Modifier.fillMaxWidth())
-                                Row { Checkbox(layout.showName, { layout = layout.copy(showName = it) }); Text("Nombre") }
-                                Row { Checkbox(layout.showPrice, { layout = layout.copy(showPrice = it) }); Text("Precio") }
-                                Row { Checkbox(layout.showBarcode, { layout = layout.copy(showBarcode = it) }); Text("Código") }
-                                EditorEtiquetaCanvas(state = editor, anchoMm = layout.labelWidthMm, altoMm = layout.labelHeightMm, onChange = { editor = it })
-                                Button(enabled = !busy, onClick = {
-                                    scope.launch {
-                                        busy = true
-                                        try {
-                                            val pdf = withContext(Dispatchers.IO) { LabelPdfGenerator.create(this@MainActivity, layout, editor) }
-                                            val printer = destino
-                                            if (printer != null && (printer.puedeImprimirPdfPorIpp || printer.esEpsonL4150)) {
-                                                status = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirPdf(printer, pdf) }
-                                            } else if (servicioHabilitado) {
-                                                printPdf(pdf); status = "PDF preparado en el selector de impresión Android."
-                                            } else {
-                                                status = "No envié las etiquetas: configura IPP/PDF o Epson L4150 ESC/P-R directo, o activa MARJHO en ajustes de impresión Android."
-                                            }
-                                        } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo generar el PDF." }
-                                        finally { busy = false }
-                                    }
-                                }) { Text("Generar e imprimir etiquetas") }
-                            }
-                        }
                     }
 
+                    if (seccion == SeccionApp.ETIQUETAS) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Diseñá e imprimí etiquetas", style = MaterialTheme.typography.titleLarge)
+                            Text("Definí medidas, distribución y contenido. La vista previa refleja el tamaño físico configurado.", style = MaterialTheme.typography.bodyMedium)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(selected = !layout.individual, onClick = { layout = layout.copy(individual = false) }, label = { Text("Varias por hoja") })
+                                FilterChip(selected = layout.individual, onClick = { layout = layout.copy(individual = true) }, label = { Text("Individual") })
+                            }
+                            NumberField("Ancho etiqueta (mm)", layout.labelWidthMm) { layout = layout.copy(labelWidthMm = it) }
+                            NumberField("Alto etiqueta (mm)", layout.labelHeightMm) { layout = layout.copy(labelHeightMm = it) }
+                            if (!layout.individual) {
+                                NumberField("Columnas", layout.columns.toFloat(), true) { layout = layout.copy(columns = it.toInt().coerceIn(1,6)) }
+                                NumberField("Filas", layout.rows.toFloat(), true) { layout = layout.copy(rows = it.toInt().coerceIn(1,12)) }
+                                NumberField("Margen (mm)", layout.marginMm) { layout = layout.copy(marginMm = it) }
+                                NumberField("Separación X (mm)", layout.gapXmm) { layout = layout.copy(gapXmm = it) }
+                                NumberField("Separación Y (mm)", layout.gapYmm) { layout = layout.copy(gapYmm = it) }
+                            }
+                            OutlinedTextField(layout.productName, { layout = layout.copy(productName = it) }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
+                            OutlinedTextField(layout.price, { layout = layout.copy(price = it) }, label = { Text("Precio") }, modifier = Modifier.fillMaxWidth())
+                            OutlinedTextField(layout.barcode, { layout = layout.copy(barcode = it) }, label = { Text("Código") }, modifier = Modifier.fillMaxWidth())
+                            Row { Checkbox(layout.showName, { layout = layout.copy(showName = it) }); Text("Nombre") }
+                            Row { Checkbox(layout.showPrice, { layout = layout.copy(showPrice = it) }); Text("Precio") }
+                            Row { Checkbox(layout.showBarcode, { layout = layout.copy(showBarcode = it) }); Text("Código") }
+                            EditorEtiquetaCanvas(state = editor, anchoMm = layout.labelWidthMm, altoMm = layout.labelHeightMm, onChange = { editor = it })
+                            Button(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                                scope.launch {
+                                    busy = true
+                                    try {
+                                        val pdf = withContext(Dispatchers.IO) { LabelPdfGenerator.create(this@MainActivity, layout, editor) }
+                                        val printer = destino
+                                        if (printer != null && (printer.puedeImprimirPdfPorIpp || printer.esEpsonL4150)) {
+                                            status = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirPdf(printer, pdf) }
+                                        } else if (servicioHabilitado) {
+                                            printPdf(pdf); status = "PDF preparado en el selector de impresión Android."
+                                        } else {
+                                            status = "No envié las etiquetas: configura IPP/PDF o Epson L4150 ESC/P-R directo, o activa MARJHO en ajustes de impresión Android."
+                                        }
+                                    } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo generar el PDF." }
+                                    finally { busy = false }
+                                }
+                            }) { Text(if (busy) "Preparando etiqueta…" else "Generar e imprimir etiquetas") }
+                        }
+                    }
+                    }
+
+                    if (seccion == SeccionApp.AJUSTES) {
                     ElevatedCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("4. Servicio Android", style = MaterialTheme.typography.titleLarge)
+                            Text(if (servicioHabilitado) "MARJHO está listo para recibir trabajos desde otras aplicaciones." else "MARJHO está desactivado para trabajos enviados desde otras aplicaciones.")
                             Text("También podés activar MARJHO para recibir trabajos enviados desde otras aplicaciones.")
-                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { startActivity(Intent(Settings.ACTION_PRINT_SETTINGS)) }) {
+                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { ajustesImpresion.launch(Intent(Settings.ACTION_PRINT_SETTINGS)) }) {
                                 Text("Abrir ajustes de impresión Android")
                             }
+                            Text("La impresión directa desde MARJHO usa IPP o el perfil ESC/P-R; ese envío no depende de activar el servicio del sistema.", style = MaterialTheme.typography.bodySmall)
                         }
                     }
-                    Text(status, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
 
                 if (popup) {
@@ -649,8 +664,110 @@ class MainActivity : ComponentActivity() {
                         confirmButton = { TextButton(onClick = { popup = false; finder.detener(); buscando = false }) { Text("Cerrar") } }
                     )
                 }
+
+                if (configIpPopup) {
+                    AlertDialog(
+                        onDismissRequest = { configIpPopup = false },
+                        title = { Text("Configurar impresora por IP") },
+                        text = {
+                            Column(
+                                Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text("Ingresá la IP local. MARJHO consulta IPP para detectar formatos; el puerto TCP por sí solo no identifica el lenguaje de impresión.", style = MaterialTheme.typography.bodySmall)
+                                OutlinedTextField(ip, { ip = it }, label = { Text("Dirección IPv4") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = validIp(ip) && !busy, onClick = {
+                                    prefs.edit().putString(KEY_IP, ip.trim()).apply()
+                                    DestinoImpresion.limpiar(prefs)
+                                    destino = null
+                                    seleccionada = null
+                                    status = "IP guardada. Buscá la impresora para consultar sus capacidades."
+                                    configIpPopup = false
+                                }) { Text("Guardar IP") }
+                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = validIp(ip) && !busy, onClick = {
+                                    status = "Consultando IPP y TCP 9100 en $ip…"
+                                    scope.launch {
+                                        busy = true
+                                        try {
+                                            val reporte = withContext(Dispatchers.IO) { ProtocoloImpresion.analizarIp(ip.trim()) }
+                                            if (reporte.soportaPdf) {
+                                                val elegido = reporte.copy(impresora = reporte.impresora.copy(nombre = "Impresora ${ip.trim()}"))
+                                                elegido.comoDestino().guardar(prefs)
+                                                destino = elegido.comoDestino()
+                                                status = reporte.resumen()
+                                            } else {
+                                                status = "${reporte.resumen()}\nTCP no confirma qué lenguaje entiende la impresora."
+                                            }
+                                        } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo consultar la impresora." }
+                                        finally { busy = false }
+                                    }
+                                }) { Text(if (busy) "Consultando…" else "Detectar protocolo") }
+                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = validIp(ip) && !busy, onClick = {
+                                    scope.launch {
+                                        busy = true
+                                        try {
+                                            val abre = withContext(Dispatchers.IO) { ProtocoloImpresion.puertoAbierto(ip.trim(), 9100, 1500) }
+                                            if (!abre) error("$ip no responde en TCP 9100.")
+                                            val manual = DestinoImpresion(
+                                                ip = ip.trim(), nombre = "Epson L4150", modelo = "Epson L4150",
+                                                protocolo = "ESC/P-R TCP 9100 (seleccionado manualmente)", uriIpp = null,
+                                                formatos = emptySet(), medios = setOf("iso_a4_210x297mm"), color = true,
+                                                resolucionesDpi = setOf(360), duplex = false, puerto9100Abierto = true,
+                                                rutaDirecta = "ESC/P-R: TCP 9100 (directo seleccionado)", forzarEscpr = true
+                                            )
+                                            manual.guardar(prefs)
+                                            destino = manual
+                                            status = "Destino configurado como Epson L4150. TCP 9100 no valida la impresión física."
+                                        } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo comprobar TCP 9100." }
+                                        finally { busy = false }
+                                    }
+                                }) { Text("Usar perfil Epson L4150") }
+                            }
+                        },
+                        confirmButton = { TextButton(onClick = { configIpPopup = false }) { Text("Cerrar") } }
+                    )
+                }
+
+                if (perfilPopup) {
+                    destino?.takeIf { it.esEpsonL4150 }?.let { perfil ->
+                        AlertDialog(
+                            onDismissRequest = { perfilPopup = false },
+                            title = { Text("Epson L4150") },
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("Ruta seleccionada: ${perfil.rutaDirecta}", style = MaterialTheme.typography.bodySmall)
+                                    OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                                        val actualizado = perfil.copy(
+                                            forzarEscpr = !perfil.forzarEscpr,
+                                            rutaDirecta = if (!perfil.forzarEscpr) "ESC/P-R: TCP 9100 (directo seleccionado)"
+                                                else if (perfil.puedeImprimirPdfPorIpp) "IPP: PDF" else "ESC/P-R: TCP 9100"
+                                        )
+                                        actualizado.guardar(prefs)
+                                        destino = actualizado
+                                        status = if (actualizado.forzarEscpr) "ESC/P-R directo seleccionado para ${perfil.nombre}."
+                                            else "Se usará IPP si acepta PDF; ESC/P-R queda como alternativa para la L4150."
+                                    }) { Text(if (perfil.forzarEscpr) "Cambiar a IPP automático" else "Forzar ESC/P-R directo") }
+                                    OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                                        busy = true
+                                        scope.launch {
+                                            try {
+                                                val pdf = withContext(Dispatchers.IO) {
+                                                    textoToPdf("PRUEBA DE IMPRESION DIRECTA\nMARJHO Print Service\nEpson L4150\nESC/P-R por TCP 9100\n${perfil.ip}", File(cacheDir, "marjho_prueba_escpr.pdf"))
+                                                }
+                                                status = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirEscpr(perfil, pdf) }
+                                            } catch (e: Exception) { status = e.localizedMessage ?: "No se pudo enviar la prueba ESC/P-R." }
+                                            finally { busy = false }
+                                        }
+                                    }) { Text(if (busy) "Enviando…" else "Imprimir página de prueba") }
+                                }
+                            },
+                            confirmButton = { TextButton(onClick = { perfilPopup = false }) { Text("Listo") } }
+                        )
+                    }
+                }
             }
         }
+    }
     }
 
     private fun renderPdfPage(file: File, pageIndex: Int): Bitmap? {

@@ -12,6 +12,7 @@ Su objetivo es aparecer en el selector de impresión del sistema Android y recib
 - Editor PDF con vista por página, giro, eliminación de páginas, marca de agua y extracción de texto; editor DOCX básico y texto plano; conversión texto-PDF e imagen.
 - Exportación mediante el selector de documentos Android; no requiere nube ni Firebase.
 - Límite conservado del controlador ESC/P-R: hasta 20 páginas A4 por trabajo.
+- Interfaz dividida en cuatro pantallas: Red, Archivos, Etiquetas y Ajustes. La IP manual y las opciones de Epson se abren como diálogos.
 
 El detalle actualizado y los límites de cada formato están en [`docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md`](docs/ETAPA_4_AUTODETECCION_Y_EDITORES.md). Las secciones de etapas 1–3 que siguen documentan el historial y algunas limitaciones ya resueltas.
 
@@ -46,7 +47,7 @@ APK esperado:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-La validación de esta iteración se realizó compilando desde Android Studio. El flujo de impresora Epson L4150 por ESC/P-R ya se probó desde el Xiaomi conectado y el usuario confirmó que salió la hoja. Las funciones de edición documental requieren validación con archivos representativos antes de distribuir un APK.
+La iteración de interfaz se compiló con `:app:assembleDebug`, se instaló y se abrió en el Xiaomi conectado; se verificó visualmente la pantalla Red con la Epson L4150 detectada y la navegación de cuatro secciones. El flujo Epson L4150 por ESC/P-R ya se probó desde el Xiaomi y el usuario confirmó que salió la hoja. Los editores de documentos todavía requieren validación con archivos representativos antes de distribuir un APK.
 
 ## Instalar y configurar
 
