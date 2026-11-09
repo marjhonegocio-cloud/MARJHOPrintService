@@ -190,6 +190,10 @@ class MainActivity : ComponentActivity() {
                                     seccion = SeccionApp.PDF
                                     status = "Abierto en PDF View: ${loaded.nombre}"
                                     startActivity(PdfViewActivity.intent(this@MainActivity, loaded.archivo))
+                                } else if (pickerDesdePdf && (loaded.extension == "docx" || loaded.texto != null)) {
+                                    seccion = SeccionApp.PDF
+                                    status = "Abierto en el visor de documentos: ${loaded.nombre}"
+                                    startActivity(DocumentoViewActivity.intent(this@MainActivity, loaded.archivo))
                                 } else {
                                     documento = loaded
                                     seccion = SeccionApp.ARCHIVOS
@@ -210,6 +214,10 @@ class MainActivity : ComponentActivity() {
                     if (reciente.extension == "pdf") {
                         seccion = SeccionApp.PDF
                         startActivity(PdfViewActivity.intent(this@MainActivity, reciente.archivo))
+                        return
+                    }
+                    if (reciente.extension == "docx" || GestorDocumentos.admiteVisorTexto(reciente.extension)) {
+                        startActivity(DocumentoViewActivity.intent(this@MainActivity, reciente.archivo))
                         return
                     }
                     busy = true
@@ -708,7 +716,11 @@ class MainActivity : ComponentActivity() {
                                             scope.launch {
                                                 try {
                                                     val reporte = withContext(Dispatchers.IO) { ProtocoloImpresion.analizar(printer) }
-                                                    val guardado = reporte.comoDestino()
+                                                    val base = reporte.comoDestino()
+                                                    val guardado = if (base.esEpsonL4150) base.copy(
+                                                        forzarEscpr = true,
+                                                        rutaDirecta = "ESC/P-R: TCP 9100 (directo seleccionado)"
+                                                    ) else base
                                                     guardado.guardar(prefs)
                                                     destino = guardado
                             status = if (guardado.esEpsonL4150) {

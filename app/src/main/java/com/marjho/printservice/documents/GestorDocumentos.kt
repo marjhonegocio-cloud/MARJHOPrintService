@@ -20,11 +20,14 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.StringReader
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
@@ -35,6 +38,7 @@ import javax.xml.transform.stream.StreamResult
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import org.w3c.dom.Node
+import org.xml.sax.InputSource
 import java.util.zip.ZipInputStream
 
 data class DocumentoAbierto(
@@ -55,6 +59,8 @@ data class DocumentoReciente(
 )
 
 object GestorDocumentos {
+    fun admiteVisorTexto(extension: String): Boolean = extension.lowercase() in TEXT_EXTENSIONS
+
     fun importar(context: Context, uri: Uri, leerTextoPdf: Boolean = true): DocumentoAbierto {
         val resolver = context.contentResolver
         val mime = resolver.getType(uri) ?: "application/octet-stream"
@@ -189,14 +195,17 @@ object GestorDocumentos {
         val salida = File(context.cacheDir, "${base}_editado.docx")
         val lineas = texto.replace("\r\n", "\n").replace('\r', '\n').split('\n')
         var seActualizo = false
+        var totalExpandido = 0L
         ZipInputStream(original.inputStream()).use { entrada ->
             ZipOutputStream(FileOutputStream(salida)).use { zipSalida ->
                 while (true) {
                     val entry = entrada.nextEntry ?: break
+                    require(!entry.isDirectory || entry.name.length < 240) { "El DOCX contiene una entrada no válida." }
                     val nueva = ZipEntry(entry.name).apply { if (entry.time >= 0L) time = entry.time }
                     zipSalida.putNextEntry(nueva)
                     if (entry.name == "word/document.xml") {
-                        val xml = entrada.readBytes()
+                        val xml = entrada.readLimited(MAX_DOCX_XML_BYTES)
+                        totalExpandido += xml.size
                         val dom = parseWordXml(ByteArrayInputStream(xml))
                         val parrafos = dom.getElementsByTagNameNS(WORD_NS, "p")
                         require(parrafos.length == lineas.size) {
@@ -209,8 +218,9 @@ object GestorDocumentos {
                         zipSalida.write(serializarXml(dom))
                         seActualizo = true
                     } else {
-                        entrada.copyTo(zipSalida)
+                        totalExpandido += entrada.copyLimitedTo(zipSalida, MAX_DOCX_EXPANDED_BYTES - totalExpandido)
                     }
+                    require(totalExpandido <= MAX_DOCX_EXPANDED_BYTES) { "El DOCX descomprimido supera el límite seguro de 64 MB." }
                     zipSalida.closeEntry()
                     entrada.closeEntry()
                 }
@@ -417,26 +427,269 @@ object GestorDocumentos {
     }
 
     private fun extraerTextoDocx(file: File): String {
-        val dom = ZipInputStream(file.inputStream()).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                if (entry.name == "word/document.xml") return@use parseWordXml(ByteArrayInputStream(zip.readBytes()))
-                zip.closeEntry()
-            }
-            null
-        } ?: throw IllegalArgumentException("El DOCX no contiene word/document.xml o está dañado.")
+        val dom = ZipFile(file).use { zip ->
+            val entry = zip.getEntry("word/document.xml")
+                ?: throw IllegalArgumentException("El DOCX no contiene word/document.xml o está dañado.")
+            require(entry.size in 1..MAX_DOCX_XML_BYTES) { "El contenido principal de Word supera el límite seguro de 8 MB." }
+            zip.getInputStream(entry).use { parseWordXml(ByteArrayInputStream(it.readLimited(MAX_DOCX_XML_BYTES))) }
+        }
         val parrafos = dom.getElementsByTagNameNS(WORD_NS, "p")
         return (0 until parrafos.length).map { leerTextoParrafo(parrafos.item(it)) }.joinToString("\n")
     }
 
+    /** Convierte DOCX a una vista HTML local, conservando párrafos, títulos, tablas y formato básico. */
+    fun docxComoHtml(file: File): String {
+        val document: Document
+        val styles: Map<String, String>
+        ZipFile(file).use { zip ->
+            val documentEntry = zip.getEntry("word/document.xml")
+                ?: throw IllegalArgumentException("El DOCX no contiene word/document.xml o está dañado.")
+            require(documentEntry.size in 1..MAX_DOCX_XML_BYTES) {
+                "El contenido principal de Word supera el límite seguro de 8 MB."
+            }
+            document = zip.getInputStream(documentEntry).use {
+                parseWordXml(ByteArrayInputStream(it.readLimited(MAX_DOCX_XML_BYTES)))
+            }
+            val styleEntry = zip.getEntry("word/styles.xml")
+            styles = if (styleEntry == null || styleEntry.size !in 1..MAX_DOCX_XML_BYTES) emptyMap() else {
+                zip.getInputStream(styleEntry).use { parseWordXml(ByteArrayInputStream(it.readLimited(MAX_DOCX_XML_BYTES))) }
+                    .let(::extraerEstilosWord)
+            }
+        }
+
+        val cuerpo = document.getElementsByTagNameNS(WORD_NS, "body").item(0)
+            ?: throw IllegalArgumentException("El DOCX no tiene un cuerpo de documento válido.")
+        val html = StringBuilder()
+        var child = cuerpo.firstChild
+        while (child != null) {
+            when (child.localName) {
+                "p" -> html.append(renderizarParrafoWord(child, styles))
+                "tbl" -> html.append(renderizarTablaWord(child, styles))
+            }
+            require(html.length <= MAX_DOCX_HTML_CHARS) {
+                "El DOCX es demasiado extenso para la vista previa segura. Abrilo en una aplicación de Word."
+            }
+            child = child.nextSibling
+        }
+        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=4">
+            <style>
+              *{box-sizing:border-box} html,body{margin:0;padding:0;background:#eef1f5;color:#202124;font-family:Roboto,"Noto Sans",Arial,sans-serif;font-size:16px;line-height:1.58}
+              body{padding:14px 10px 30px}.paper{width:min(100%,850px);min-height:88vh;margin:0 auto;background:#fff;padding:32px 30px 48px;box-shadow:0 3px 18px #17202a20;border-radius:5px;overflow-wrap:anywhere}
+              p{margin:0 0 12px;white-space:pre-wrap}h1,h2,h3,h4{line-height:1.25;margin:22px 0 10px;color:#172b4d}h1{font-size:1.7em}h2{font-size:1.42em}h3{font-size:1.2em}
+              table{width:100%;border-collapse:collapse;margin:14px 0;table-layout:fixed}td,th{border:1px solid #aeb7c2;padding:6px 8px;vertical-align:top;overflow-wrap:anywhere}td p,th p{margin:0 0 5px}
+              img{max-width:100%;height:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}
+              @media(max-width:480px){body{padding:0;background:#fff}.paper{width:100%;min-height:100vh;padding:20px 17px 36px;border-radius:0;box-shadow:none}}
+              @media print{body{background:#fff;padding:0}.paper{width:100%;box-shadow:none;margin:0;padding:0;border-radius:0}}
+            </style></head><body><main class="paper">$html</main></body></html>"""
+    }
+
+    private fun extraerEstilosWord(dom: Document): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        val elements = dom.getElementsByTagNameNS(WORD_NS, "style")
+        for (index in 0 until elements.length) {
+            val element = elements.item(index) as? Element ?: continue
+            val id = element.getAttributeNS(WORD_NS, "styleId").ifBlank { element.getAttribute("w:styleId") }
+            val name = element.getElementsByTagNameNS(WORD_NS, "name").item(0) as? Element
+            val label = name?.getAttributeNS(WORD_NS, "val").orEmpty()
+            if (id.isNotBlank()) result[id] = label
+        }
+        return result
+    }
+
+    private fun renderizarParrafoWord(parrafo: Node, styles: Map<String, String>): String {
+        val pPr = (parrafo as? Element)?.getElementsByTagNameNS(WORD_NS, "pPr")?.item(0) as? Element
+        val styleId = pPr?.getElementsByTagNameNS(WORD_NS, "pStyle")?.item(0)?.let { node ->
+            (node as? Element)?.getAttributeNS(WORD_NS, "val") ?: (node as? Element)?.getAttribute("w:val")
+        }.orEmpty()
+        val name = styles[styleId].orEmpty().lowercase()
+        val outline = pPr?.getElementsByTagNameNS(WORD_NS, "outlineLvl")?.item(0)?.let {
+            ((it as? Element)?.getAttributeNS(WORD_NS, "val") ?: (it as? Element)?.getAttribute("w:val"))?.toIntOrNull()
+        }
+        val heading = when {
+            outline != null -> (outline + 1).coerceIn(1, 6)
+            "title" in name -> 1
+            "heading 1" in name || "heading1" in name || "título 1" in name -> 1
+            "heading 2" in name || "heading2" in name || "título 2" in name -> 2
+            "heading 3" in name || "heading3" in name || "título 3" in name -> 3
+            else -> 0
+        }
+        val align = pPr?.getElementsByTagNameNS(WORD_NS, "jc")?.item(0)?.let {
+            ((it as? Element)?.getAttributeNS(WORD_NS, "val") ?: (it as? Element)?.getAttribute("w:val"))
+        }
+        val alignCss = when (align) { "center" -> "text-align:center;"; "right" -> "text-align:right;"; "both", "distribute" -> "text-align:justify;"; else -> "" }
+        val out = StringBuilder()
+        var child = parrafo.firstChild
+        while (child != null) {
+            if (child.localName == "r" || child.localName == "hyperlink" || child.localName == "smartTag") {
+                out.append(renderizarInlineWord(child))
+            } else if (child.localName == "bookmarkStart" || child.localName == "bookmarkEnd" || child.localName == "pPr") {
+                // Structural nodes do not contribute visible text.
+            }
+            child = child.nextSibling
+        }
+        val tag = if (heading > 0) "h$heading" else "p"
+        return "<$tag style=\"$alignCss\">${out.ifEmpty { "&#8203;" }}</$tag>"
+    }
+
+    private fun renderizarInlineWord(node: Node): String {
+        if (node.localName == "hyperlink" || node.localName == "smartTag") {
+            val out = StringBuilder(); var child = node.firstChild
+            while (child != null) { out.append(renderizarInlineWord(child)); child = child.nextSibling }
+            return out.toString()
+        }
+        if (node.localName != "r") return ""
+        val run = node as? Element ?: return ""
+        val rPr = run.getElementsByTagNameNS(WORD_NS, "rPr").item(0) as? Element
+        val declarations = mutableListOf<String>()
+        fun enabled(tag: String): Boolean = rPr?.getElementsByTagNameNS(WORD_NS, tag)?.item(0)?.let { el ->
+            val value = (el as? Element)?.getAttributeNS(WORD_NS, "val") ?: (el as? Element)?.getAttribute("w:val")
+            value != "0" && value != "false" && value != "off"
+        } == true
+        if (enabled("b")) declarations += "font-weight:700"
+        if (enabled("i")) declarations += "font-style:italic"
+        if (enabled("u")) declarations += "text-decoration:underline"
+        val color = rPr?.getElementsByTagNameNS(WORD_NS, "color")?.item(0)?.let { el ->
+            ((el as? Element)?.getAttributeNS(WORD_NS, "val") ?: (el as? Element)?.getAttribute("w:val"))
+        }
+        if (color != null && color.matches(Regex("[0-9a-fA-F]{6}"))) declarations += "color:#$color"
+        val halfPoints = rPr?.getElementsByTagNameNS(WORD_NS, "sz")?.item(0)?.let { el ->
+            ((el as? Element)?.getAttributeNS(WORD_NS, "val") ?: (el as? Element)?.getAttribute("w:val"))?.toIntOrNull()
+        }
+        if (halfPoints != null && halfPoints in 12..96) declarations += "font-size:${halfPoints / 2}pt"
+        val content = StringBuilder()
+        var child = run.firstChild
+        while (child != null) {
+            when (child.localName) {
+                "t", "delText" -> content.append(escaparHtml(child.textContent))
+                "tab" -> content.append("&emsp;")
+                "br", "cr" -> content.append("<br>")
+                "drawing", "object", "pict" -> content.append("<span style=\"color:#687385;font-size:.9em\">[imagen o elemento gráfico]</span>")
+            }
+            child = child.nextSibling
+        }
+        return if (declarations.isEmpty()) content.toString() else "<span style=\"${declarations.joinToString(";")}\">$content</span>"
+    }
+
+    private fun renderizarTablaWord(tabla: Node, styles: Map<String, String>): String {
+        val output = StringBuilder("<table><tbody>")
+        var row = tabla.firstChild
+        while (row != null) {
+            if (row.localName == "tr") {
+                output.append("<tr>")
+                var cell = row.firstChild
+                while (cell != null) {
+                    if (cell.localName == "tc") {
+                        output.append("<td>")
+                        var block = cell.firstChild
+                        while (block != null) {
+                            when (block.localName) {
+                                "p" -> output.append(renderizarParrafoWord(block, styles))
+                                "tbl" -> output.append(renderizarTablaWord(block, styles))
+                            }
+                            block = block.nextSibling
+                        }
+                        output.append("</td>")
+                    }
+                    cell = cell.nextSibling
+                }
+                output.append("</tr>")
+            }
+            row = row.nextSibling
+        }
+        return output.append("</tbody></table>").toString()
+    }
+
+    fun textoComoHtml(nombre: String, texto: String, extension: String): String {
+        val max = MAX_TEXT_PREVIEW_CHARS
+        val source = texto.take(max)
+        val safeName = escaparHtml(nombre)
+        var body: String
+        if (extension in setOf("md", "markdown", "rst")) {
+            body = escaparHtml(source)
+            body = body.replace(Regex("(?m)^######\\s+(.+)$"), "<h6>$1</h6>")
+                .replace(Regex("(?m)^#####\\s+(.+)$"), "<h5>$1</h5>")
+                .replace(Regex("(?m)^####\\s+(.+)$"), "<h4>$1</h4>")
+                .replace(Regex("(?m)^###\\s+(.+)$"), "<h3>$1</h3>")
+                .replace(Regex("(?m)^##\\s+(.+)$"), "<h2>$1</h2>")
+                .replace(Regex("(?m)^#\\s+(.+)$"), "<h1>$1</h1>")
+                .replace(Regex("\\*\\*(.+?)\\*\\*"), "<strong>$1</strong>")
+                .replace(Regex("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)"), "<em>$1</em>")
+                .replace(Regex("`([^`\\n]+)`"), "<code>$1</code>")
+                .replace("\r\n", "\n").replace('\r', '\n')
+                .replace(Regex("\\n{2,}"), "</p><p>")
+                .replace('\n', ' ')
+            body = "<article><p>$body</p></article>"
+        } else {
+            body = "<pre>${escaparHtml(source)}</pre>"
+        }
+        if (texto.length > max) body += "<p class=\"notice\">Vista previa limitada por memoria. Abrí el archivo en un editor para ver el resto del contenido.</p>"
+        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=4">
+            <style>*{box-sizing:border-box}html,body{margin:0;background:#eef1f5;color:#202124;font-family:Roboto,"Noto Sans",Arial,sans-serif;font-size:16px;line-height:1.62}body{padding:14px 10px 32px}.paper{width:min(100%,850px);min-height:88vh;margin:0 auto;background:#fff;padding:30px;box-shadow:0 3px 18px #17202a20;border-radius:5px;overflow-wrap:anywhere}.name{margin:0 0 22px;color:#637083;font-size:13px}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:"Roboto Mono",monospace;font-size:.9em;line-height:1.55}article{white-space:normal}p{margin:0 0 12px}h1,h2,h3,h4,h5,h6{line-height:1.25;color:#172b4d;margin:20px 0 9px}code{background:#edf0f4;border-radius:4px;padding:1px 4px;font-family:monospace}.notice{margin-top:24px;padding:12px;background:#fff4d6;border-radius:8px;font-size:13px}@media(max-width:480px){body{padding:0;background:#fff}.paper{width:100%;min-height:100vh;padding:20px 17px 36px;border-radius:0;box-shadow:none}}@media print{body{background:#fff;padding:0}.paper{width:100%;box-shadow:none;margin:0;padding:0;border-radius:0}}</style></head>
+            <body><main class="paper"><div class="name">$safeName</div>$body</main></body></html>"""
+    }
+
+    private fun escaparHtml(value: String): String = buildString(minOf(value.length + 32, MAX_DOCX_HTML_CHARS)) {
+        for (char in value) {
+            when (char) {
+                '&' -> append("&amp;")
+                '<' -> append("&lt;")
+                '>' -> append("&gt;")
+                '"' -> append("&quot;")
+                '\'' -> append("&#39;")
+                else -> append(char)
+            }
+            require(length <= MAX_DOCX_HTML_CHARS) { "El documento es demasiado extenso para la vista previa." }
+        }
+    }
+
+    private fun InputStream.readLimited(limit: Long): ByteArray {
+        require(limit in 1..Int.MAX_VALUE.toLong())
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            val count = read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= limit) { "El contenido descomprimido supera el límite seguro." }
+            output.write(buffer, 0, count)
+        }
+        return output.toByteArray()
+    }
+
+    private fun InputStream.copyLimitedTo(output: java.io.OutputStream, limit: Long): Long {
+        require(limit >= 0)
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            val count = read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= limit) { "El DOCX descomprimido supera el límite seguro de 64 MB." }
+            output.write(buffer, 0, count)
+        }
+        return total
+    }
+
     private fun parseWordXml(input: ByteArrayInputStream): Document {
-        val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
-        runCatching { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
-        runCatching { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) }
-        runCatching { factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
-        runCatching { factory.setAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "") }
-        runCatching { factory.setAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "") }
-        return factory.newDocumentBuilder().parse(input)
+        val xmlBytes = input.readLimited(MAX_DOCX_XML_BYTES)
+        val xmlText = String(xmlBytes, StandardCharsets.UTF_8)
+        require(!xmlText.contains("<!DOCTYPE", ignoreCase = true)) { "El DOCX contiene una declaración XML no permitida." }
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            // Android's built-in parser throws UnsupportedOperationException for XInclude.
+            runCatching { isXIncludeAware = false }
+            runCatching { isExpandEntityReferences = false }
+            runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+            runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+            runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+            runCatching { setAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "") }
+            runCatching { setAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "") }
+        }
+        val builder = factory.newDocumentBuilder().apply {
+            setEntityResolver { _, _ -> InputSource(StringReader("")) }
+        }
+        return builder.parse(ByteArrayInputStream(xmlBytes))
     }
 
     private fun leerTextoParrafo(parrafo: Node): String = buildString {
@@ -536,6 +789,10 @@ object GestorDocumentos {
     private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     private const val MAX_FILE_BYTES = 40L * 1024 * 1024
     private const val MAX_TEXT_BYTES = 2L * 1024 * 1024
+    private const val MAX_DOCX_XML_BYTES = 8L * 1024 * 1024
+    private const val MAX_DOCX_EXPANDED_BYTES = 64L * 1024 * 1024
+    private const val MAX_DOCX_HTML_CHARS = 6 * 1024 * 1024
+    private const val MAX_TEXT_PREVIEW_CHARS = 700_000
     private const val MAX_RECENT_FILES = 12
     private const val MAX_RECENT_BYTES = 160L * 1024 * 1024
     private val TEXT_MIMES = setOf("application/json", "application/xml", "text/xml", "application/javascript", "application/x-yaml", "application/yaml", "application/sql")

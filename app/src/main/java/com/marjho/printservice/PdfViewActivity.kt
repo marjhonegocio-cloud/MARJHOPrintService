@@ -3,6 +3,7 @@ package com.marjho.printservice
 import android.content.ClipData
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -19,6 +20,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.FileProvider
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntSize
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -27,6 +30,7 @@ import com.marjho.printservice.documents.GestorDocumentos
 import com.marjho.printservice.documents.PdfMarkStroke
 import com.marjho.printservice.documents.PdfMarkup
 import com.marjho.printservice.documents.PdfPageSize
+import com.marjho.printservice.PdfZoomTile
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.ProtocoloImpresion
 import kotlinx.coroutines.CoroutineDispatcher
@@ -36,6 +40,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 class PdfViewActivity : ComponentActivity() {
     private val renderDispatcher: CoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
@@ -125,6 +130,7 @@ class PdfViewActivity : ComponentActivity() {
                     tamanosPagina = tamanosPagina,
                     marcas = marcas,
                     renderizarPagina = ::renderizarPagina,
+                    renderizarMosaico = ::renderizarMosaico,
                     cargando = cargando,
                     imprimiendo = imprimiendo,
                     guardando = guardando,
@@ -253,6 +259,57 @@ class PdfViewActivity : ComponentActivity() {
             bitmaps.put(key, bitmap)
             bitmap
         }
+    }
+
+    private suspend fun renderizarMosaico(
+        index: Int,
+        viewport: IntSize,
+        zoom: Float,
+        offset: Offset
+    ): PdfZoomTile? = withContext(renderDispatcher) {
+        val pdfRenderer = renderer ?: return@withContext null
+        if (index !in 0 until pdfRenderer.pageCount || viewport.width <= 0 || viewport.height <= 0) return@withContext null
+        val scale = zoom.takeIf { it.isFinite() }?.coerceIn(1.05f, 4f) ?: return@withContext null
+        runCatching {
+            pdfRenderer.openPage(index).use { page ->
+                val ratio = viewport.height.toFloat() / viewport.width
+                var tileWidth = viewport.width.coerceIn(320, 1440)
+                var tileHeight = (tileWidth * ratio).roundToInt().coerceAtLeast(1)
+                val maxPixels = 4_000_000f
+                val area = tileWidth.toLong() * tileHeight
+                if (area > maxPixels) {
+                    val factor = kotlin.math.sqrt(maxPixels / area.toFloat())
+                    tileWidth = (tileWidth * factor).toInt().coerceAtLeast(1)
+                    tileHeight = (tileHeight * factor).toInt().coerceAtLeast(1)
+                }
+
+                val leftFraction = (offset.x / viewport.width).takeIf { it.isFinite() }?.coerceIn(0f, 1f - 1f / scale) ?: 0f
+                val topFraction = (offset.y / viewport.height).takeIf { it.isFinite() }?.coerceIn(0f, 1f - 1f / scale) ?: 0f
+                val cropLeft = page.width * leftFraction
+                val cropTop = page.height * topFraction
+                val cropWidth = page.width / scale
+                val cropHeight = page.height / scale
+                val scaleX = tileWidth / cropWidth
+                val scaleY = tileHeight / cropHeight
+                val transform = Matrix().apply {
+                    setValues(floatArrayOf(
+                        scaleX, 0f, -cropLeft * scaleX,
+                        0f, scaleY, -cropTop * scaleY,
+                        0f, 0f, 1f
+                    ))
+                }
+                val tile = Bitmap.createBitmap(tileWidth, tileHeight, Bitmap.Config.ARGB_8888)
+                tile.eraseColor(android.graphics.Color.WHITE)
+                page.render(tile, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                PdfZoomTile(
+                    bitmap = tile,
+                    leftFraction = leftFraction,
+                    topFraction = topFraction,
+                    widthFraction = 1f / scale,
+                    heightFraction = 1f / scale
+                )
+            }
+        }.getOrNull()
     }
 
     private suspend fun prepararDocumento(original: File, marks: Map<Int, List<PdfMarkStroke>>): File {
