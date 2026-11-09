@@ -328,11 +328,7 @@ class PdfViewActivity : ComponentActivity() {
                     bitmap = tile,
                     viewport = viewport,
                     scale = zoom,
-                    offset = offset,
-                    leftFraction = leftFraction,
-                    topFraction = topFraction,
-                    widthFraction = 1f / scale,
-                    heightFraction = 1f / scale
+                    offset = offset
                 )
             }
         }.getOrNull()

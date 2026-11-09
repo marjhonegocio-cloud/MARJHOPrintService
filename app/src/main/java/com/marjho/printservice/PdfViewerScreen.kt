@@ -75,7 +75,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.IntOffset
 import com.marjho.printservice.documents.PdfMarkPoint
 import com.marjho.printservice.documents.PdfMarkStroke
 import com.marjho.printservice.documents.PdfPageSize
@@ -96,11 +95,7 @@ data class PdfZoomTile(
     val bitmap: Bitmap,
     val viewport: IntSize,
     val scale: Float,
-    val offset: Offset,
-    val leftFraction: Float,
-    val topFraction: Float,
-    val widthFraction: Float,
-    val heightFraction: Float
+    val offset: Offset
 )
 
 @Composable
@@ -432,77 +427,78 @@ private fun PdfPage(
             .then(if (fullscreenZoom) Modifier else Modifier.clipToBounds())
             .background(Color.White)
     ) {
-        Box(
-            Modifier.fillMaxSize().then(if (fullscreenZoom) Modifier else Modifier.clipToBounds()).onSizeChanged { pageSize = it }
-                .then(if (tool == MarkTool.READ) Modifier.transformable(transformState, canPan = { zoom.scale > 1.01f }) else Modifier)
-                .then(if (tool == MarkTool.READ) Modifier.pointerInput(index) {
+        val pageInteractionModifier = Modifier.fillMaxSize().onSizeChanged { pageSize = it }
+            .then(if (tool == MarkTool.READ) Modifier.transformable(transformState, canPan = { zoom.scale > 1.01f }) else Modifier)
+            .then(
+                if (tool == MarkTool.READ) Modifier.pointerInput(index) {
                     detectTapGestures(onDoubleTap = { point ->
                         zoomTo(if (zoom.scale > 1.05f) 1f else 2.25f, point)
                     })
-                } else Modifier)
-                .graphicsLayer {
+                } else Modifier.pointerInput(index, tool, color, strokeWidth) {
+                    fun addPoint(x: Float, y: Float) {
+                        livePoints.add(PdfMarkPoint((x / this.size.width).coerceIn(0f, 1f), (y / this.size.height).coerceIn(0f, 1f)))
+                    }
+                    detectDragGestures(
+                        onDragStart = { livePoints.clear(); addPoint(it.x, it.y) },
+                        onDrag = { change, _ -> addPoint(change.position.x, change.position.y); change.consume() },
+                        onDragEnd = {
+                            if (livePoints.size > 1) {
+                                onStroke(PdfMarkStroke(livePoints.toList(), color.toArgb(), strokeWidth, tool == MarkTool.HIGHLIGHTER))
+                            }
+                            livePoints.clear()
+                        },
+                        onDragCancel = { livePoints.clear() }
+                    )
+                }
+            )
+
+        Box(pageInteractionModifier) {
+            Box(
+                Modifier.fillMaxSize().graphicsLayer {
                     scaleX = zoom.scale
                     scaleY = zoom.scale
                     transformOrigin = TransformOrigin(0f, 0f)
                     translationX = -zoom.offset.x * zoom.scale
                     translationY = -zoom.offset.y * zoom.scale
                 }
-                .then(
-                    if (tool == MarkTool.READ) Modifier
-                    else Modifier.pointerInput(index, tool, color, strokeWidth) {
-                        fun addPoint(x: Float, y: Float) {
-                            livePoints.add(PdfMarkPoint((x / this.size.width).coerceIn(0f, 1f), (y / this.size.height).coerceIn(0f, 1f)))
-                        }
-                        detectDragGestures(
-                            onDragStart = { livePoints.clear(); addPoint(it.x, it.y) },
-                            onDrag = { change, _ -> addPoint(change.position.x, change.position.y); change.consume() },
-                            onDragEnd = {
-                                if (livePoints.size > 1) {
-                                    onStroke(PdfMarkStroke(livePoints.toList(), color.toArgb(), strokeWidth, tool == MarkTool.HIGHLIGHTER))
-                                }
-                                livePoints.clear()
-                            },
-                            onDragCancel = { livePoints.clear() }
-                        )
-                    }
-                )
+            ) {
+                bitmap?.let { image ->
+                    Image(image.asImageBitmap(), contentDescription = "Página ${index + 1}", modifier = Modifier.fillMaxSize())
+                } ?: Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                }
+            }
+        }
+
+        zoomTile?.takeIf { it.viewport == pageSize && it.scale == zoom.scale && it.offset == zoom.offset }?.let { tile ->
+            Image(tile.bitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
+        }
+
+        Canvas(
+            Modifier.fillMaxSize().graphicsLayer {
+                scaleX = zoom.scale
+                scaleY = zoom.scale
+                transformOrigin = TransformOrigin(0f, 0f)
+                translationX = -zoom.offset.x * zoom.scale
+                translationY = -zoom.offset.y * zoom.scale
+            }
         ) {
-            bitmap?.let { image ->
-                Image(image.asImageBitmap(), contentDescription = "Página ${index + 1}", modifier = Modifier.fillMaxSize())
-            } ?: Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            }
-            zoomTile?.takeIf { it.viewport == pageSize && it.scale == zoom.scale && it.offset == zoom.offset }?.let { tile ->
-                Canvas(Modifier.fillMaxSize()) {
-                    val left = tile.leftFraction * size.width
-                    val top = tile.topFraction * size.height
-                    val width = tile.widthFraction * size.width
-                    val height = tile.heightFraction * size.height
-                    drawImage(
-                        image = tile.bitmap.asImageBitmap(),
-                        dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
-                        dstSize = IntSize(width.roundToInt().coerceAtLeast(1), height.roundToInt().coerceAtLeast(1))
-                    )
+            val all = strokes + if (livePoints.size > 1) listOf(PdfMarkStroke(livePoints.toList(), color.toArgb(), strokeWidth, tool == MarkTool.HIGHLIGHTER)) else emptyList()
+            all.forEach { mark ->
+                if (mark.points.size < 2) return@forEach
+                val path = Path().apply {
+                    moveTo(mark.points.first().x * this@Canvas.size.width, mark.points.first().y * this@Canvas.size.height)
+                    mark.points.drop(1).forEach { lineTo(it.x * this@Canvas.size.width, it.y * this@Canvas.size.height) }
                 }
-            }
-            Canvas(Modifier.fillMaxSize()) {
-                val all = strokes + if (livePoints.size > 1) listOf(PdfMarkStroke(livePoints.toList(), color.toArgb(), strokeWidth, tool == MarkTool.HIGHLIGHTER)) else emptyList()
-                all.forEach { mark ->
-                    if (mark.points.size < 2) return@forEach
-                    val path = Path().apply {
-                        moveTo(mark.points.first().x * this@Canvas.size.width, mark.points.first().y * this@Canvas.size.height)
-                        mark.points.drop(1).forEach { lineTo(it.x * this@Canvas.size.width, it.y * this@Canvas.size.height) }
-                    }
-                    drawPath(
-                        path = path,
-                        color = Color(mark.color).copy(alpha = if (mark.highlighter) 0.30f else 1f),
-                        style = Stroke(
-                            width = (mark.width / size.width * this@Canvas.size.width).coerceAtLeast(1f),
-                            cap = StrokeCap.Round,
-                            join = StrokeJoin.Round
-                        )
+                drawPath(
+                    path = path,
+                    color = Color(mark.color).copy(alpha = if (mark.highlighter) 0.30f else 1f),
+                    style = Stroke(
+                        width = (mark.width / size.width * this@Canvas.size.width).coerceAtLeast(1f),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
                     )
-                }
+                )
             }
         }
         if (tool != MarkTool.READ) {
