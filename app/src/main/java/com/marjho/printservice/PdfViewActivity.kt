@@ -303,6 +303,9 @@ class PdfViewActivity : ComponentActivity() {
                 page.render(tile, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 PdfZoomTile(
                     bitmap = tile,
+                    viewport = viewport,
+                    scale = zoom,
+                    offset = offset,
                     leftFraction = leftFraction,
                     topFraction = topFraction,
                     widthFraction = 1f / scale,

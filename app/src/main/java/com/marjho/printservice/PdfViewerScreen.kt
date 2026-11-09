@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -92,6 +94,9 @@ private class PdfPageZoomState {
 
 data class PdfZoomTile(
     val bitmap: Bitmap,
+    val viewport: IntSize,
+    val scale: Float,
+    val offset: Offset,
     val leftFraction: Float,
     val topFraction: Float,
     val widthFraction: Float,
@@ -126,6 +131,8 @@ fun PdfViewerScreen(
     var color by remember { mutableStateOf(Color(0xFFE53935)) }
     var grosor by remember { mutableFloatStateOf(3.5f) }
     val zoomPorPagina = remember { mutableStateMapOf<Int, PdfPageZoomState>() }
+    var paginaAmpliada by remember { mutableIntStateOf(-1) }
+    val paginaMostrada = if (paginaAmpliada >= 0) paginaAmpliada else paginaVisible
     val alphaControles by animateFloatAsState(if (controlesVisibles) 1f else 0.10f, label = "controles PDF")
     val colores = listOf(Color(0xFFE53935), Color(0xFFFFC107), Color(0xFF43A047), Color(0xFF1976D2), Color(0xFF212121))
 
@@ -159,36 +166,75 @@ fun PdfViewerScreen(
         }
     ) {
         if (totalPaginas > 0) {
-            LazyColumn(
-                state = lista,
-                // Keep a fixed toolbar lane above the first page so the page counter and
-                // zoom affordances never cover PDF content, even on page one.
-                modifier = Modifier.fillMaxSize().padding(top = 56.dp),
-                userScrollEnabled = herramienta == MarkTool.READ,
-                verticalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                itemsIndexed((0 until paginasCargadas).toList(), key = { _, index -> index }) { _, index ->
-                    val size = tamanosPagina[index] ?: PdfPageSize(595, 842)
-                    val zoom = zoomPorPagina[index] ?: remember(index) { PdfPageZoomState() }
-                    SideEffect { zoomPorPagina[index] = zoom }
+            if (paginaAmpliada in 0 until paginasCargadas) {
+                val index = paginaAmpliada
+                val page = tamanosPagina[index] ?: PdfPageSize(595, 842)
+                val zoom = zoomPorPagina[index] ?: remember(index) { PdfPageZoomState() }
+                val pageAspect = page.width.toFloat() / page.height.coerceAtLeast(1)
+                BoxWithConstraints(
+                    Modifier.fillMaxSize().padding(top = 56.dp).clipToBounds(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Isolate the active sheet while zoomed so the neighbouring page
+                    // cannot show through as an unscaled strip.
+                    val pageWidth = minOf(maxWidth, maxHeight * pageAspect)
+                    val pageHeight = pageWidth / pageAspect
                     PdfPage(
                         index = index,
-                        size = size,
+                        size = page,
                         strokes = marcas[index].orEmpty(),
                         tool = herramienta,
-                        showControls = controlesVisibles && index == paginaVisible,
+                        showControls = controlesVisibles,
                         zoom = zoom,
                         color = color,
                         strokeWidth = grosor,
                         renderizar = renderizarPagina,
                         renderizarMosaico = renderizarMosaico,
-                        onStroke = { onAgregarMarca(index, it) }
+                        onStroke = { onAgregarMarca(index, it) },
+                        onZoomStateChange = { pageIndex, enlarged ->
+                            if (enlarged) paginaAmpliada = pageIndex
+                            else if (paginaAmpliada == pageIndex) paginaAmpliada = -1
+                        },
+                        fullscreenZoom = true,
+                        modifier = Modifier.width(pageWidth).height(pageHeight)
                     )
                 }
-                if (paginasCargadas < totalPaginas) {
-                    item(key = "cargando-mas") {
-                        Box(Modifier.fillMaxWidth().height(82.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp, color = Color.White.copy(alpha = 0.78f))
+            } else {
+                LazyColumn(
+                    state = lista,
+                    // Keep a fixed toolbar lane above the first page so the page counter and
+                    // zoom affordances never cover PDF content, even on page one.
+                    modifier = Modifier.fillMaxSize().padding(top = 56.dp),
+                    userScrollEnabled = herramienta == MarkTool.READ,
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    itemsIndexed((0 until paginasCargadas).toList(), key = { _, index -> index }) { _, index ->
+                        val size = tamanosPagina[index] ?: PdfPageSize(595, 842)
+                        val zoom = zoomPorPagina[index] ?: remember(index) { PdfPageZoomState() }
+                        SideEffect { zoomPorPagina[index] = zoom }
+                        PdfPage(
+                            index = index,
+                            size = size,
+                            strokes = marcas[index].orEmpty(),
+                            tool = herramienta,
+                            showControls = controlesVisibles && index == paginaVisible,
+                            zoom = zoom,
+                            color = color,
+                            strokeWidth = grosor,
+                            renderizar = renderizarPagina,
+                            renderizarMosaico = renderizarMosaico,
+                            onStroke = { onAgregarMarca(index, it) },
+                            onZoomStateChange = { pageIndex, enlarged ->
+                                if (enlarged) paginaAmpliada = pageIndex
+                                else if (paginaAmpliada == pageIndex) paginaAmpliada = -1
+                            }
+                        )
+                    }
+                    if (paginasCargadas < totalPaginas) {
+                        item(key = "cargando-mas") {
+                            Box(Modifier.fillMaxWidth().height(82.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp, color = Color.White.copy(alpha = 0.78f))
+                            }
                         }
                     }
                 }
@@ -204,7 +250,7 @@ fun PdfViewerScreen(
                 shape = CircleShape
             ) {
                 Text(
-                    "${(paginaVisible + 1).coerceAtMost(totalPaginas)} / $totalPaginas${if (herramienta != MarkTool.READ) " · ${if (herramienta == MarkTool.PEN) "Lápiz" else "Resaltador"}" else ""}",
+                    "${(paginaMostrada + 1).coerceAtMost(totalPaginas)} / $totalPaginas${if (herramienta != MarkTool.READ) " · ${if (herramienta == MarkTool.PEN) "Lápiz" else "Resaltador"}" else ""}",
                     Modifier.padding(horizontal = 15.dp, vertical = 8.dp),
                     color = Color.White
                 )
@@ -304,7 +350,10 @@ private fun PdfPage(
     strokeWidth: Float,
     renderizar: suspend (Int, Int) -> Bitmap?,
     renderizarMosaico: suspend (Int, IntSize, Float, Offset) -> PdfZoomTile?,
-    onStroke: (PdfMarkStroke) -> Unit
+    onStroke: (PdfMarkStroke) -> Unit,
+    onZoomStateChange: (Int, Boolean) -> Unit,
+    fullscreenZoom: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
@@ -315,6 +364,7 @@ private fun PdfPage(
     var pageSize by remember(index) { mutableStateOf(IntSize.Zero) }
     val livePoints = remember(index) { mutableStateListOf<PdfMarkPoint>() }
     val targetRenderWidth = screenWidth
+    val isZoomed = zoom.scale > 1.01f
     // Button zoom should preserve the text near the top of the visible page. Pinch and
     // double-tap still use the user's exact focal point.
     val zoomButtonAnchor = Offset(pageSize.width / 2f, pageSize.height * 0.18f)
@@ -326,11 +376,15 @@ private fun PdfPage(
         if (zoom.scale <= 1.02f || pageSize == IntSize.Zero) {
             zoomTile = null
         } else {
-            // Render only the area under the user's fingers after the gesture settles.
-            // A 120 ms debounce avoids rendering on every pinch/pan frame.
-            delay(120)
+            // Let pinch/pan gestures settle before asking PdfRenderer for a new tile.
+            // Rendering is serialized with the base page renderer, so a longer debounce
+            // avoids queuing expensive crops while the user is still moving the page.
+            delay(220)
             zoomTile = renderizarMosaico(index, pageSize, zoom.scale, zoom.offset)
         }
+    }
+    LaunchedEffect(index, isZoomed) {
+        onZoomStateChange(index, isZoomed)
     }
     LaunchedEffect(tool) {
         if (tool != MarkTool.READ) {
@@ -373,11 +427,13 @@ private fun PdfPage(
     }
 
     Box(
-        Modifier.fillMaxWidth().padding(horizontal = 2.dp).aspectRatio(size.width.toFloat() / size.height.coerceAtLeast(1))
-            .clipToBounds().background(Color.White)
+        (if (fullscreenZoom) modifier else Modifier.fillMaxWidth().padding(horizontal = 2.dp)
+            .aspectRatio(size.width.toFloat() / size.height.coerceAtLeast(1)))
+            .then(if (fullscreenZoom) Modifier else Modifier.clipToBounds())
+            .background(Color.White)
     ) {
         Box(
-            Modifier.fillMaxSize().clipToBounds().onSizeChanged { pageSize = it }
+            Modifier.fillMaxSize().then(if (fullscreenZoom) Modifier else Modifier.clipToBounds()).onSizeChanged { pageSize = it }
                 .then(if (tool == MarkTool.READ) Modifier.transformable(transformState, canPan = { zoom.scale > 1.01f }) else Modifier)
                 .then(if (tool == MarkTool.READ) Modifier.pointerInput(index) {
                     detectTapGestures(onDoubleTap = { point ->
@@ -416,7 +472,7 @@ private fun PdfPage(
             } ?: Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
             }
-            zoomTile?.let { tile ->
+            zoomTile?.takeIf { it.viewport == pageSize && it.scale == zoom.scale && it.offset == zoom.offset }?.let { tile ->
                 Canvas(Modifier.fillMaxSize()) {
                     val left = tile.leftFraction * size.width
                     val top = tile.topFraction * size.height
