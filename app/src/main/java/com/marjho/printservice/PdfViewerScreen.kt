@@ -379,7 +379,7 @@ private fun PdfPage(
             // Let pinch/pan gestures settle before asking PdfRenderer for a new tile.
             // Rendering is serialized with the base page renderer, so a longer debounce
             // avoids queuing expensive crops while the user is still moving the page.
-            delay(220)
+            delay(140)
             zoomTile = renderizarMosaico(index, pageSize, zoom.scale, zoom.offset)
         }
     }

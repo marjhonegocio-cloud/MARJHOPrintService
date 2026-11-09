@@ -109,8 +109,30 @@ class PdfViewActivity : ComponentActivity() {
                         require(total > 0) { "El PDF no contiene páginas." }
                         archivo = pdf
                         paginasTotales = total
-                        paginasCargadas = minOf(10, total)
-                        tamanosPagina = leerTamanos(0, paginasCargadas)
+                        // Show and render the first sheet without waiting for metadata
+                        // from the rest of the initial batch.
+                        tamanosPagina = leerTamanos(0, 1)
+                        paginasCargadas = 1
+                        cargando = false
+
+                        val finPrimerLote = minOf(10, total)
+                        if (finPrimerLote > 1) {
+                            cargandoMas = true
+                            scope.launch {
+                                try {
+                                    // Give the first sheet one frame to enqueue its bitmap
+                                    // render before page-size reads use the shared renderer.
+                                    kotlinx.coroutines.delay(48)
+                                    val tamanosRestantes = leerTamanos(1, finPrimerLote)
+                                    tamanosPagina = tamanosPagina + tamanosRestantes
+                                    paginasCargadas = finPrimerLote
+                                } catch (error: Exception) {
+                                    mensaje = error.localizedMessage ?: "No se pudieron cargar más páginas."
+                                } finally {
+                                    cargandoMas = false
+                                }
+                            }
+                        }
                     } catch (error: Exception) {
                         mensaje = error.localizedMessage ?: "No se pudo abrir el PDF."
                     } finally {
@@ -140,10 +162,11 @@ class PdfViewActivity : ComponentActivity() {
                             val inicio = paginasCargadas
                             val fin = minOf(inicio + 10, paginasTotales)
                             cargandoMas = true
-                            paginasCargadas = fin
                             scope.launch {
                                 try {
-                                    tamanosPagina = tamanosPagina + leerTamanos(inicio, fin)
+                                    val nuevosTamanos = leerTamanos(inicio, fin)
+                                    tamanosPagina = tamanosPagina + nuevosTamanos
+                                    paginasCargadas = fin
                                 } catch (error: Exception) {
                                     mensaje = error.localizedMessage ?: "No se pudieron cargar más páginas."
                                 } finally {
