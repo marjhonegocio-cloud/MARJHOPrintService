@@ -12,12 +12,11 @@ import java.net.Socket
 import java.util.concurrent.CancellationException
 
 /**
- * Impresion ESC/P-R local para Epson L4150, probada con UNA hoja real.
- * Esta ampliacion envia varias paginas dentro de UN trabajo ESC/P-R:
- * iniciarTrabajo -> (comenzarPagina / raster / finalizarPagina)* -> terminarTrabajo.
+ * Impresión ESC/P-R local para Epson L4150. Cada página se envía como un
+ * trabajo independiente usando la secuencia de una hoja ya validada en equipo.
  *
  * El limite de 20 paginas es deliberado mientras se valida la impresion por lotes.
- * Un socket sin excepcion NO demuestra que haya salido el papel.
+ * Un socket sin excepción NO demuestra que haya salido el papel.
  * Ejecutar en Dispatchers.IO; NO invocar desde el hilo principal.
  */
 object ImpresorEscprDirecto {
@@ -73,51 +72,55 @@ object ImpresorEscprDirecto {
 
                 var hojasCompletadas = 0
                 var hojaEnProceso = 0
+                var bytesOriginales = 0L
+                var bytesTransmitidos = 0L
                 try {
-                    Socket().use { socket ->
-                        socket.tcpNoDelay = true
-                        socket.keepAlive = true
-                        socket.connect(InetSocketAddress(ip, 9100), 3500)
-                        val codec = EscprRasterCodec(socket.getOutputStream())
-                        val tamano = codec.iniciarTrabajo()
+                    for (indice in 0 until total) {
+                        comprobarCancelacion()
+                        hojaEnProceso = indice + 1
+                        progreso(Avance(hojaEnProceso, total, 0, hojasCompletadas))
 
-                        for (indice in 0 until total) {
-                            comprobarCancelacion()
-                            hojaEnProceso = indice + 1
-                            progreso(Avance(hojaEnProceso, total, 0, hojasCompletadas))
+                        Socket().use { socket ->
+                            socket.tcpNoDelay = true
+                            socket.keepAlive = true
+                            socket.connect(InetSocketAddress(ip, 9100), 3500)
+                            val codec = EscprRasterCodec(socket.getOutputStream())
+                            val tamano = codec.iniciarTrabajo()
 
                             renderer.openPage(indice).use { pagina ->
-                                codec.comenzarPagina(hojaEnProceso)
+                                // La impresora validó físicamente el flujo de una hoja con número 1.
+                                codec.comenzarPagina(1)
                                 enviarRaster(pagina, codec, tamano, comprobarCancelacion) { porcentaje ->
                                     progreso(Avance(hojaEnProceso, total, porcentaje, hojasCompletadas))
                                 }
                                 codec.finalizarPagina()
                             }
-                            hojasCompletadas++
-                            progreso(Avance(hojaEnProceso, total, 0, hojasCompletadas))
+
+                            comprobarCancelacion()
+                            codec.terminarTrabajo()
+                            socket.getOutputStream().flush()
+                            bytesOriginales += codec.bytesRgbOriginal
+                            bytesTransmitidos += codec.bytesRgbTransmitidos
                         }
 
-                        comprobarCancelacion()
-                        codec.terminarTrabajo() // Una sola finalizacion al terminar TODAS las hojas
-                        socket.getOutputStream().flush()
-
-                        val original = codec.bytesRgbOriginal / 1024
-                        val comprimido = codec.bytesRgbTransmitidos / 1024
-                        val ahorro = if (codec.bytesRgbOriginal == 0L) 0L else
-                            100L - codec.bytesRgbTransmitidos * 100L / codec.bytesRgbOriginal
-                        return "$total hojas enviadas por ESC/P-R a $ip:9100. " +
-                            "RGB: $original KB; raster: $comprimido KB " +
-                            "(ahorro aproximado: $ahorro %). " +
-                            "Datos transmitidos, no confirmacion de impresion fisica. " +
-                            "Revisa las hojas antes de repetir."
+                        hojasCompletadas++
+                        progreso(Avance(hojaEnProceso, total, 0, hojasCompletadas))
                     }
+
+                    val original = bytesOriginales / 1024
+                    val comprimido = bytesTransmitidos / 1024
+                    val ahorro = if (bytesOriginales == 0L) 0L else
+                        100L - bytesTransmitidos * 100L / bytesOriginales
+                    return "$total hojas enviadas por ESC/P-R a $ip:9100 en trabajos de una hoja. " +
+                        "RGB: $original KB; raster: $comprimido KB (ahorro aproximado: $ahorro %). " +
+                        "Datos transmitidos, no confirmación de impresión física. Revisa las hojas antes de repetir."
                 } catch (e: CancellationException) {
                     // No convertir en exito ni interceptar la cancelacion de coroutines.
                     throw e
                 } catch (e: Exception) {
                     throw IOException(
                         "Se interrumpio el envio en la hoja ${hojaEnProceso.coerceAtLeast(1)} de $total " +
-                            "($hojasCompletadas hojas terminadas en el flujo). " +
+                        "($hojasCompletadas trabajos de una hoja terminados). " +
                             "Puede haber paginas pendientes o ya impresas. " +
                             "Revisa la Epson antes de reintentar. " +
                             "Detalle: ${e.localizedMessage ?: "error de conexion"}", e

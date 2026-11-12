@@ -39,6 +39,7 @@ import com.marjho.printservice.documents.DocumentoAbierto
 import com.marjho.printservice.documents.DocumentoReciente
 import com.marjho.printservice.documents.GestorDocumentos
 import com.marjho.printservice.documents.OcrPdf
+import com.marjho.printservice.documents.PdfPageSelection
 import com.marjho.printservice.network.BuscadorImpresorasRed
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.ImpresoraEncontrada
@@ -685,7 +686,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                             OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { ajustesImpresion.launch(Intent(Settings.ACTION_PRINT_SETTINGS)) }) {
-                                Text("Abrir ajustes de impresión Android")
+                                Text(if (servicioHabilitado) "Abrir ajustes de impresión" else "Activar MARJHO para otras aplicaciones")
                             }
                             Text("La impresión directa desde MARJHO usa IPP o el perfil ESC/P-R; ese envío no depende de activar el servicio del sistema.", style = MaterialTheme.typography.bodySmall)
                         }
@@ -944,11 +945,43 @@ class MainActivity : ComponentActivity() {
                 else callback.onLayoutFinished(PrintDocumentInfo.Builder(file.name).setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT).setPageCount(pageCount).build(), true)
             }
             override fun onWrite(pages: Array<out android.print.PageRange>, destination: ParcelFileDescriptor, cancellationSignal: CancellationSignal, callback: WriteResultCallback) {
-                try {
-                    if (cancellationSignal.isCanceled) { callback.onWriteCancelled(); return }
-                    FileInputStream(file).use { input -> FileOutputStream(destination.fileDescriptor).use { output -> input.copyTo(output) } }
-                    callback.onWriteFinished(if (pageCount == 0) emptyArray() else arrayOf(android.print.PageRange(0, pageCount - 1)))
-                } catch (e: Exception) { callback.onWriteFailed(e.localizedMessage) }
+                Thread({
+                    var subset: File? = null
+                    try {
+                        if (cancellationSignal.isCanceled) { callback.onWriteCancelled(); return@Thread }
+                        val selectedPages = pages.asSequence().flatMap { range ->
+                            val first = range.start.coerceAtLeast(0)
+                            val last = range.end.coerceAtMost(pageCount - 1)
+                            if (first <= last) (first..last).asSequence() else emptySequence()
+                        }.distinct().sorted().toList()
+                        if (selectedPages.isEmpty()) {
+                            callback.onWriteFinished(emptyArray())
+                            return@Thread
+                        }
+                        subset = PdfPageSelection.createPdf(this@MainActivity, file, selectedPages)
+                        if (cancellationSignal.isCanceled) { callback.onWriteCancelled(); return@Thread }
+                        FileInputStream(requireNotNull(subset)).use { input ->
+                            FileOutputStream(destination.fileDescriptor).use { output -> input.copyTo(output) }
+                        }
+                        val writtenRanges = mutableListOf<android.print.PageRange>()
+                        var rangeStart = selectedPages.first()
+                        var rangeEnd = rangeStart
+                        selectedPages.drop(1).forEach { page ->
+                            if (page == rangeEnd + 1) rangeEnd = page
+                            else {
+                                writtenRanges += android.print.PageRange(rangeStart, rangeEnd)
+                                rangeStart = page
+                                rangeEnd = page
+                            }
+                        }
+                        writtenRanges += android.print.PageRange(rangeStart, rangeEnd)
+                        callback.onWriteFinished(writtenRanges.toTypedArray())
+                    } catch (e: Exception) {
+                        callback.onWriteFailed(e.localizedMessage)
+                    } finally {
+                        subset?.takeIf { it != file }?.delete()
+                    }
+                }, "MARJHO-print-pages").start()
             }
         }, PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).setMinMargins(PrintAttributes.Margins.NO_MARGINS).build())
     }

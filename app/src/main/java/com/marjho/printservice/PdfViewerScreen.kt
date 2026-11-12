@@ -30,10 +30,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
@@ -76,6 +78,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import com.marjho.printservice.documents.PdfMarkPoint
+import com.marjho.printservice.documents.PdfPageSelection
 import com.marjho.printservice.documents.PdfMarkStroke
 import com.marjho.printservice.documents.PdfPageSize
 import kotlinx.coroutines.delay
@@ -113,7 +116,7 @@ fun PdfViewerScreen(
     mensaje: String?,
     onCargarMas: () -> Unit,
     onCompartir: () -> Unit,
-    onImprimir: () -> Unit,
+    onImprimir: (List<Int>) -> Unit,
     onGuardarCopia: () -> Unit,
     onDeshacer: () -> Unit,
     onAgregarMarca: (Int, PdfMarkStroke) -> Unit
@@ -122,6 +125,10 @@ fun PdfViewerScreen(
     var paginaVisible by remember { mutableIntStateOf(0) }
     var controlesVisibles by remember { mutableStateOf(true) }
     var mostrarHerramientas by remember { mutableStateOf(false) }
+    var mostrarDialogImprimir by remember { mutableStateOf(false) }
+    var imprimirTodasLasPaginas by remember { mutableStateOf(true) }
+    var paginasParaImprimir by remember { mutableStateOf("") }
+    var errorSeleccionPaginas by remember { mutableStateOf<String?>(null) }
     var herramienta by remember { mutableStateOf(MarkTool.READ) }
     var color by remember { mutableStateOf(Color(0xFFE53935)) }
     var grosor by remember { mutableFloatStateOf(3.5f) }
@@ -280,7 +287,13 @@ fun PdfViewerScreen(
                     modifier = Modifier.size(58.dp).semantics { contentDescription = "Herramientas de lápiz y resaltador" }
                 ) { Text("✎", style = MaterialTheme.typography.titleLarge) }
                 SmallFloatingActionButton(
-                    onClick = onImprimir,
+                    onClick = {
+                        imprimirTodasLasPaginas = true
+                        paginasParaImprimir = ""
+                        errorSeleccionPaginas = null
+                        mostrarDialogImprimir = true
+                        controlesVisibles = true
+                    },
                     containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
                     contentColor = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(54.dp).semantics { contentDescription = "Imprimir PDF directamente" }
@@ -289,6 +302,68 @@ fun PdfViewerScreen(
                     else Text("⎙", style = MaterialTheme.typography.titleLarge)
                 }
             }
+        }
+
+        if (mostrarDialogImprimir) {
+            val resultadoSeleccion = if (imprimirTodasLasPaginas || paginasParaImprimir.isBlank()) null
+                else runCatching { PdfPageSelection.parse(paginasParaImprimir, totalPaginas) }
+            val paginasValidas = if (imprimirTodasLasPaginas) totalPaginas else resultadoSeleccion?.getOrNull()?.size ?: 0
+            val errorVisible = errorSeleccionPaginas ?: resultadoSeleccion?.exceptionOrNull()?.localizedMessage
+            AlertDialog(
+                onDismissRequest = { if (!imprimiendo) mostrarDialogImprimir = false },
+                title = { Text("Imprimir PDF") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("El documento tiene $totalPaginas páginas. Elegí cuáles enviar a la impresora.")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = imprimirTodasLasPaginas,
+                                onClick = { imprimirTodasLasPaginas = true; errorSeleccionPaginas = null },
+                                label = { Text("Todas ($totalPaginas)") }
+                            )
+                            FilterChip(
+                                selected = !imprimirTodasLasPaginas,
+                                onClick = { imprimirTodasLasPaginas = false; errorSeleccionPaginas = null },
+                                label = { Text("Elegir páginas") }
+                            )
+                        }
+                        if (!imprimirTodasLasPaginas) {
+                            OutlinedTextField(
+                                value = paginasParaImprimir,
+                                onValueChange = { paginasParaImprimir = it; errorSeleccionPaginas = null },
+                                label = { Text("Páginas") },
+                                placeholder = { Text("1, 3-5, 8") },
+                                supportingText = {
+                                    Text(errorVisible ?: "Separá páginas con comas y usá guion para rangos.")
+                                },
+                                isError = errorVisible != null,
+                                singleLine = true
+                            )
+                            Text("$paginasValidas ${if (paginasValidas == 1) "página seleccionada" else "páginas seleccionadas"}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !imprimiendo && (imprimirTodasLasPaginas || paginasParaImprimir.isNotBlank()),
+                        onClick = {
+                            try {
+                                val seleccion = if (imprimirTodasLasPaginas) (0 until totalPaginas).toList()
+                                    else PdfPageSelection.parse(paginasParaImprimir, totalPaginas)
+                                mostrarDialogImprimir = false
+                                onImprimir(seleccion)
+                            } catch (error: IllegalArgumentException) {
+                                errorSeleccionPaginas = error.localizedMessage ?: "Revisá las páginas elegidas."
+                            }
+                        }
+                    ) {
+                        Text("Imprimir $paginasValidas ${if (paginasValidas == 1) "página" else "páginas"}")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { mostrarDialogImprimir = false }) { Text("Cancelar") }
+                }
+            )
         }
 
         if (mostrarHerramientas) {

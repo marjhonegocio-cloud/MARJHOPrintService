@@ -29,6 +29,7 @@ import androidx.lifecycle.lifecycleScope
 import com.marjho.printservice.documents.GestorDocumentos
 import com.marjho.printservice.documents.PdfMarkStroke
 import com.marjho.printservice.documents.PdfMarkup
+import com.marjho.printservice.documents.PdfPageSelection
 import com.marjho.printservice.documents.PdfPageSize
 import com.marjho.printservice.PdfZoomTile
 import com.marjho.printservice.network.DestinoImpresion
@@ -197,21 +198,29 @@ class PdfViewActivity : ComponentActivity() {
                             }
                         }
                     },
-                    onImprimir = {
+                    onImprimir = { paginasSeleccionadas ->
                         val original = archivo ?: return@PdfViewerScreen
                         if (!imprimiendo) scope.launch {
                             imprimiendo = true
+                            var pdfBase: File? = null
+                            var pdfSeleccionado: File? = null
                             try {
-                                val pdf = prepararDocumento(original, marcas.toMap())
+                                pdfBase = prepararDocumento(original, marcas.toMap())
+                                pdfSeleccionado = withContext(Dispatchers.IO) {
+                                    PdfPageSelection.createPdf(this@PdfViewActivity, requireNotNull(pdfBase), paginasSeleccionadas)
+                                }
                                 val impresora = DestinoImpresion.desde(getSharedPreferences("marjho_print_local", MODE_PRIVATE))
                                     ?: error("Elegí una impresora en la sección Red antes de imprimir.")
                                 require(impresora.puedeImprimirPdfPorIpp || impresora.esEpsonL4150) {
                                     "La impresora guardada no admite envío directo de PDF. Configurá IPP/PDF o el perfil Epson L4150 en Red."
                                 }
-                                mensaje = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirPdf(impresora, pdf) }
+                                mensaje = "Enviando ${paginasSeleccionadas.size} ${if (paginasSeleccionadas.size == 1) "página" else "páginas"} a ${impresora.nombre}…"
+                                mensaje = withContext(Dispatchers.IO) { ProtocoloImpresion.imprimirPdf(impresora, requireNotNull(pdfSeleccionado)) }
                             } catch (error: Exception) {
                                 mensaje = error.localizedMessage ?: "No se pudo enviar el PDF a la impresora."
                             } finally {
+                                pdfSeleccionado?.takeIf { it != pdfBase && it != original }?.delete()
+                                pdfBase?.takeIf { it != original }?.delete()
                                 imprimiendo = false
                             }
                         }
