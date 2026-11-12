@@ -1,6 +1,7 @@
 package com.marjho.printservice.driver
 
 import java.io.DataOutputStream
+import java.io.BufferedOutputStream
 import java.io.OutputStream
 import java.time.LocalDateTime
 
@@ -16,7 +17,9 @@ import java.time.LocalDateTime
  * La salida NO es PDF ni ESC/POS.
  */
 class EscprRasterCodec(salida: OutputStream) {
-    private val out = DataOutputStream(salida)
+    // Each raster row is encoded with several small writes. Buffer them so a
+    // page does not become thousands of tiny TCP packets on mobile Wi-Fi.
+    private val out = DataOutputStream(BufferedOutputStream(salida, OUTPUT_BUFFER_BYTES))
     private var iniciado = false
     private var paginaAbierta = false
     private var paginasFinalizadas = 0
@@ -168,4 +171,8 @@ class EscprRasterCodec(salida: OutputStream) {
 
     private fun bytes(vararg valores: Int) = valores.forEach { out.writeByte(it) }
     private fun texto(valor: String) = out.write(valor.toByteArray(Charsets.US_ASCII))
+
+    private companion object {
+        const val OUTPUT_BUFFER_BYTES = 64 * 1024
+    }
 }

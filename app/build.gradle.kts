@@ -12,8 +12,8 @@ android {
         applicationId = "com.marjho.printservice"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "1.3.2"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21

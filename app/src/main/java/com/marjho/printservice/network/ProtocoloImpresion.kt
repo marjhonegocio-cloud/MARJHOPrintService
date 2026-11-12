@@ -226,10 +226,17 @@ object ProtocoloImpresion {
         return analizar(manual)
     }
 
-    fun imprimirPdf(destino: DestinoImpresion, archivo: File): String {
+    fun imprimirPdf(
+        destino: DestinoImpresion,
+        archivo: File,
+        progreso: (ImpresorEscprDirecto.Avance) -> Unit = {}
+    ): String {
+        require(destinoEsLocal(destino)) {
+            "Para imprimir sin Internet, configurá la IP local de la impresora (por ejemplo, 192.168.1.x)."
+        }
         require(archivo.isFile && archivo.length() > 0) { "El PDF no existe o está vacío." }
 
-        if (destino.forzarEscpr) return imprimirEscpr(destino, archivo)
+        if (destino.forzarEscpr) return imprimirEscpr(destino, archivo, progreso = progreso)
 
         val uri = destino.uriIpp
         if (uri != null) {
@@ -245,7 +252,7 @@ object ProtocoloImpresion {
         }
 
         if (destino.esEpsonL4150) {
-            return imprimirEscpr(destino, archivo)
+            return imprimirEscpr(destino, archivo, progreso = progreso)
         }
 
         throw IllegalStateException(
@@ -258,8 +265,12 @@ object ProtocoloImpresion {
     fun imprimirEscpr(
         destino: DestinoImpresion,
         archivo: File,
-        comprobarCancelacion: () -> Unit = {}
+        comprobarCancelacion: () -> Unit = {},
+        progreso: (ImpresorEscprDirecto.Avance) -> Unit = {}
     ): String {
+        require(esIpPrivadaLocal(destino.ip)) {
+            "ESC/P-R directo solo puede enviar a una impresora de la red local. Revisá la IP guardada."
+        }
         require(destino.esEpsonL4150) {
             "ESC/P-R directo solo está habilitado para el perfil Epson L4150 confirmado."
         }
@@ -269,6 +280,7 @@ object ProtocoloImpresion {
         return ImpresorEscprDirecto.imprimirHojas(
             ip = destino.ip,
             pdf = archivo,
+            progreso = progreso,
             comprobarCancelacion = comprobarCancelacion
         )
     }
@@ -287,6 +299,24 @@ object ProtocoloImpresion {
             catch (error: Exception) { ultimoError = error }
         }
         throw ultimoError ?: IllegalStateException("No se pudo negociar IPP.")
+    }
+
+    /** Limits document data to private LAN printers and mDNS .local IPP hosts. */
+    private fun destinoEsLocal(destino: DestinoImpresion): Boolean {
+        if (!esIpPrivadaLocal(destino.ip)) return false
+        val uri = destino.uriIpp ?: return true
+        val host = runCatching { URI.create(uri).host }.getOrNull()?.trimEnd('.')?.lowercase() ?: return false
+        return host == destino.ip || host.endsWith(".local")
+    }
+
+    private fun esIpPrivadaLocal(ip: String): Boolean {
+        val octetos = ip.split('.').mapNotNull(String::toIntOrNull)
+        if (octetos.size != 4 || octetos.any { it !in 0..255 }) return false
+        val (a, b) = octetos
+        return a == 10 ||
+            (a == 172 && b in 16..31) ||
+            (a == 192 && b == 168) ||
+            (a == 169 && b == 254)
     }
 
     private fun crearCliente(uriTexto: String, version: String): IppPrinter {

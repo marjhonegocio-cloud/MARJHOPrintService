@@ -140,18 +140,20 @@ object ImpresorEscprDirecto {
         val anchoPapel = t.ancho + 2 * t.margen
         val altoPapel = t.alto + 2 * t.margen
         val horizontal = pagina.width > pagina.height
-        val bandaAltura = 40
+        // Larger reusable bands reduce Bitmap churn on phones while retaining
+        // the same 360 dpi output and the same ESC/P-R raster data.
+        val bandaAltura = minOf(128, t.alto)
         val pixels = IntArray(t.ancho * bandaAltura)
         val rgb = ByteArray(t.ancho * 3)
+        val bitmap = Bitmap.createBitmap(t.ancho, bandaAltura, Bitmap.Config.ARGB_8888)
         var y = 0
         var ultimoProgreso = 0
 
-        while (y < t.alto) {
-            comprobarCancelacion()
-            val filas = minOf(bandaAltura, t.alto - y)
-            val bmp = Bitmap.createBitmap(t.ancho, filas, Bitmap.Config.ARGB_8888)
-            try {
-                bmp.eraseColor(Color.WHITE)
+        try {
+            while (y < t.alto) {
+                comprobarCancelacion()
+                val filas = minOf(bandaAltura, t.alto - y)
+                bitmap.eraseColor(Color.WHITE)
                 val matrix = Matrix()
                 if (horizontal) {
                     // Mantener exactamente la transformacion de la Etapa 11.
@@ -171,8 +173,8 @@ object ImpresorEscprDirecto {
                         0f, 0f, 1f
                     ))
                 }
-                pagina.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
-                bmp.getPixels(pixels, 0, t.ancho, 0, 0, t.ancho, filas)
+                pagina.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                bitmap.getPixels(pixels, 0, t.ancho, 0, 0, t.ancho, filas)
                 for (fila in 0 until filas) {
                     var destino = 0
                     val origen = fila * t.ancho
@@ -184,16 +186,16 @@ object ImpresorEscprDirecto {
                     }
                     codec.escribirLinea(y + fila, rgb)
                 }
-            } finally {
-                bmp.recycle()
+                y += filas
+                val porcentaje = y * 100 / t.alto
+                // Evita miles de actualizaciones durante varias hojas.
+                if (porcentaje >= ultimoProgreso + 10 || y == t.alto) {
+                    ultimoProgreso = porcentaje
+                    progreso(porcentaje)
+                }
             }
-            y += filas
-            val porcentaje = y * 100 / t.alto
-            // Evita miles de actualizaciones en Compose durante varias hojas.
-            if (porcentaje >= ultimoProgreso + 10 || y == t.alto) {
-                ultimoProgreso = porcentaje
-                progreso(porcentaje)
-            }
+        } finally {
+            bitmap.recycle()
         }
     }
 

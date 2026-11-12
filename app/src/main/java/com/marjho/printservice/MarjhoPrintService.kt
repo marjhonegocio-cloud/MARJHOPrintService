@@ -2,6 +2,7 @@ package com.marjho.printservice
 
 import android.content.Context
 import android.print.PrintAttributes
+import android.print.PrintDocumentInfo
 import android.print.PrintJobId
 import android.print.PrinterCapabilitiesInfo
 import android.print.PrinterId
@@ -10,6 +11,9 @@ import android.printservice.PrintJob
 import android.printservice.PrintService
 import android.printservice.PrinterDiscoverySession
 import android.os.ParcelFileDescriptor
+import android.os.Handler
+import android.os.Looper
+import android.graphics.pdf.PdfRenderer
 import android.util.Log
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.BuscadorImpresorasRed
@@ -90,7 +94,13 @@ class MarjhoPrintService : PrintService() {
         val printerLocalId = runCatching { printJob.info.printerId?.localId }
             .onFailure { Log.e(TAG, "No se pudo leer la impresora del trabajo $jobKey", it) }
             .getOrNull()
-        Log.i(TAG, "Trabajo en cola id=$jobKey printer=$printerLocalId queued=${runCatching { printJob.isQueued }.getOrNull()}")
+        val info = printJob.info
+        val pageCountAndroid = runCatching { printJob.document.info.pageCount }
+            .onFailure { Log.e(TAG, "No se pudo leer la información del documento $jobKey", it) }
+            .getOrDefault(PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
+        val requestedRanges = info.pages.orEmpty().joinToString { "${it.start}-${it.end}" }
+        Log.i(TAG, "Trabajo en cola id=$jobKey printer=$printerLocalId queued=${runCatching { printJob.isQueued }.getOrNull()} " +
+            "androidPages=$pageCountAndroid requested=$requestedRanges label=${info.label}")
         // PrintJob state queries and transitions are main-thread-only Android
         // APIs; only document copying and network transfer run on the IO scope.
         val started = runCatching { printJob.start() }.getOrElse { error ->
@@ -104,6 +114,10 @@ class MarjhoPrintService : PrintService() {
                 if (printJob.isQueued) printJob.fail("Android no pudo iniciar el trabajo de impresión.")
             }
             return
+        }
+        runCatching {
+            printJob.setProgress(0f)
+            printJob.setStatus("Preparando el PDF en el teléfono…")
         }
         // PrintJob and PrintDocument APIs are main-thread-only. Acquire the
         // spooled file descriptor here, before moving the file copy to IO.
@@ -129,13 +143,50 @@ class MarjhoPrintService : PrintService() {
                 val pdf = File(cacheDir, "marjho_print_${System.currentTimeMillis()}.pdf")
                 try {
                     copyDocument(documentData, pdf)
-                    Log.i(TAG, "Documento listo id=$jobKey bytes=${pdf.length()} destino=${destino.ip}")
+                    val pageCountPdf = withContext(Dispatchers.IO) {
+                        ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                            PdfRenderer(descriptor).use { it.pageCount }
+                        }
+                    }
+                    Log.i(TAG, "Documento local listo id=$jobKey bytes=${pdf.length()} androidPages=$pageCountAndroid " +
+                        "pdfPages=$pageCountPdf requested=$requestedRanges destino=${destino.ip}")
+                    if (pageCountAndroid > 0 && pageCountAndroid != pageCountPdf) {
+                        withContext(Dispatchers.Main.immediate) {
+                            if (printJob.isStarted) {
+                                printJob.setStatus("Android indicó $pageCountAndroid páginas; el PDF recibido contiene $pageCountPdf.")
+                            }
+                        }
+                    }
                     val coroutineJob = currentCoroutineContext()[Job]
+                    val mainHandler = Handler(Looper.getMainLooper())
+                    var ultimaHojaNotificada = 0
+                    var ultimoProgresoNotificado = -2
+                    val actualizarProgreso: (com.marjho.printservice.driver.ImpresorEscprDirecto.Avance) -> Unit = { avance ->
+                        val porcentaje = avance.porcentajeTotal.coerceIn(0, 100)
+                        if (avance.hojaActual != ultimaHojaNotificada || porcentaje >= ultimoProgresoNotificado + 2 || porcentaje == 100) {
+                            ultimaHojaNotificada = avance.hojaActual
+                            ultimoProgresoNotificado = porcentaje
+                            mainHandler.post {
+                                runCatching {
+                                    if (printJob.isStarted) {
+                                        printJob.setProgress(porcentaje / 100f)
+                                        printJob.setStatus("Enviando hoja ${avance.hojaActual} de ${avance.totalHojas} a la Epson…")
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (destino.esEpsonL4150 && (destino.forzarEscpr || !destino.puedeImprimirPdfPorIpp)) {
                         Log.i(TAG, "Enviando id=$jobKey por ESC/P-R")
-                        ProtocoloImpresion.imprimirEscpr(destino, pdf) {
-                            if (coroutineJob?.isActive != true) throw CancellationException("Trabajo cancelado por el usuario.")
-                        }
+                        val resumen = ProtocoloImpresion.imprimirEscpr(
+                            destino,
+                            pdf,
+                            comprobarCancelacion = {
+                                if (coroutineJob?.isActive != true) throw CancellationException("Trabajo cancelado por el usuario.")
+                            },
+                            progreso = actualizarProgreso
+                        )
+                        Log.i(TAG, "Resultado ESC/P-R id=$jobKey: $resumen")
                     } else {
                         if (coroutineJob?.isActive != true) throw CancellationException("Trabajo cancelado por el usuario.")
                         Log.i(TAG, "Enviando id=$jobKey por IPP")
@@ -172,11 +223,14 @@ class MarjhoPrintService : PrintService() {
     }
 
     override fun onRequestCancelPrintJob(printJob: PrintJob) {
+        val id = printJob.id.hashCode().toUInt().toString(16)
+        Log.i(TAG, "Android pidió cancelar id=$id started=${runCatching { printJob.isStarted }.getOrNull()} worker=${activeJobs.containsKey(printJob.id)}")
         activeJobs.remove(printJob.id)?.cancel()
         runCatching { printJob.cancel() }
     }
 
     override fun onDestroy() {
+        Log.w(TAG, "Servicio destruido con ${activeJobs.size} trabajador(es) activo(s)")
         serviceScope.coroutineContext[Job]?.cancel()
         super.onDestroy()
     }
