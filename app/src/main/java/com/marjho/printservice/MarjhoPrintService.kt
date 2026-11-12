@@ -2,6 +2,7 @@ package com.marjho.printservice
 
 import android.content.Context
 import android.print.PrintAttributes
+import android.print.PrintJobId
 import android.print.PrinterCapabilitiesInfo
 import android.print.PrinterId
 import android.print.PrinterInfo
@@ -26,39 +27,63 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 /** Android PrintService: descubre impresoras de red y usa IPP o el perfil ESC/P-R validado. */
 class MarjhoPrintService : PrintService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val activeJobs = ConcurrentHashMap<PrintJobId, Job>()
     private val destinationsByPrinterId = ConcurrentHashMap<String, DestinoImpresion>()
+    private var recoveryJob: Job? = null
 
     override fun onCreatePrinterDiscoverySession(): PrinterDiscoverySession = MarjhoDiscoverySession(this)
 
     override fun onConnected() {
         super.onConnected()
-        // Xiaomi's print spooler can reconnect the service after a job was
-        // queued without replaying onPrintJobQueued. Recover those jobs when
-        // Android reconnects so they do not remain stuck in the system queue.
+        recoverQueuedPrintJobs()
+        // Some MIUI builds disconnect this service without delivering the
+        // queued-job callback. Check Android's active-job list while connected
+        // so a job created after the print preview is still picked up.
+        recoveryJob?.cancel()
+        recoveryJob = serviceScope.launch {
+            while (isActive) {
+                delay(750)
+                withContext(Dispatchers.Main.immediate) { recoverQueuedPrintJobs() }
+            }
+        }
+    }
+
+    private fun recoverQueuedPrintJobs() {
         val jobs = runCatching { getActivePrintJobs() }
             .onFailure { Log.e(TAG, "No se pudieron recuperar los trabajos activos", it) }
             .getOrDefault(emptyList())
-        Log.i(TAG, "Servicio conectado; trabajos activos=${jobs.size}")
-        jobs.filter { runCatching { it.isQueued }.getOrDefault(false) }
-            .forEach { onPrintJobQueued(it) }
+        val queuedJobs = jobs.filter { runCatching { it.isQueued }.getOrDefault(false) }
+        if (queuedJobs.isNotEmpty()) Log.i(TAG, "Trabajos en cola recuperados=${queuedJobs.size}")
+        queuedJobs.forEach(::onPrintJobQueued)
+
+        // A process restart loses the in-memory worker. Do not leave such a
+        // started job stuck forever or resend it automatically: some bytes may
+        // already have reached the printer before the interruption.
+        jobs.filter { !activeJobs.containsKey(it.id) && runCatching { it.isStarted }.getOrDefault(false) }
+            .forEach { job ->
+                runCatching {
+                    job.fail("El envío se interrumpió. Revisá la impresora antes de volver a imprimir.")
+                }.onFailure { Log.e(TAG, "No se pudo cerrar un trabajo interrumpido", it) }
+            }
     }
 
     override fun onDisconnected() {
+        recoveryJob?.cancel()
+        recoveryJob = null
         Log.i(TAG, "Android desconectó el servicio de impresión")
         super.onDisconnected()
     }
 
     override fun onPrintJobQueued(printJob: PrintJob) {
-        val jobKey = printJob.id.toString()
-        if (activeJobs.containsKey(jobKey)) {
+        val printJobId = printJob.id
+        val jobKey = printJobId.hashCode().toUInt().toString(16)
+        if (activeJobs.containsKey(printJobId)) {
             Log.i(TAG, "Se ignora el trabajo duplicado id=$jobKey")
             return
         }
@@ -80,6 +105,17 @@ class MarjhoPrintService : PrintService() {
             }
             return
         }
+        // PrintJob and PrintDocument APIs are main-thread-only. Acquire the
+        // spooled file descriptor here, before moving the file copy to IO.
+        val documentData = runCatching { printJob.document.data }.getOrElse { error ->
+            Log.e(TAG, "No se pudo obtener el documento $jobKey", error)
+            runCatching { printJob.fail(error.localizedMessage ?: "Android no entregó el documento.") }
+            return
+        } ?: run {
+            Log.e(TAG, "Android entregó un documento vacío id=$jobKey")
+            runCatching { printJob.fail("Android no proporcionó el archivo del documento para imprimir.") }
+            return
+        }
 
         val work = serviceScope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -92,11 +128,6 @@ class MarjhoPrintService : PrintService() {
                 }
                 val pdf = File(cacheDir, "marjho_print_${System.currentTimeMillis()}.pdf")
                 try {
-                    val documentData = printJob.document.data
-                        ?: throw IllegalStateException(
-                            "Android no proporcionó el archivo del documento para imprimir."
-                        )
-
                     copyDocument(documentData, pdf)
                     Log.i(TAG, "Documento listo id=$jobKey bytes=${pdf.length()} destino=${destino.ip}")
                     val coroutineJob = currentCoroutineContext()[Job]
@@ -132,15 +163,16 @@ class MarjhoPrintService : PrintService() {
                     }
                 }
             } finally {
-                activeJobs.remove(jobKey)
+                runCatching { documentData.close() }
+                activeJobs.remove(printJobId)
             }
         }
-        activeJobs[jobKey] = work
+        activeJobs[printJobId] = work
         work.start()
     }
 
     override fun onRequestCancelPrintJob(printJob: PrintJob) {
-        activeJobs.remove(printJob.id.toString())?.cancel()
+        activeJobs.remove(printJob.id)?.cancel()
         runCatching { printJob.cancel() }
     }
 
@@ -150,7 +182,7 @@ class MarjhoPrintService : PrintService() {
     }
 
     private fun copyDocument(source: ParcelFileDescriptor, destination: File) {
-        FileInputStream(source.fileDescriptor).use { input ->
+        ParcelFileDescriptor.AutoCloseInputStream(source).use { input ->
             FileOutputStream(destination).use { output -> input.copyTo(output, 64 * 1024) }
         }
         require(destination.isFile && destination.length() > 0) { "El documento PDF está vacío." }
@@ -291,3 +323,4 @@ class MarjhoPrintService : PrintService() {
         private const val PREFS = "marjho_print_local"
     }
 }
+
