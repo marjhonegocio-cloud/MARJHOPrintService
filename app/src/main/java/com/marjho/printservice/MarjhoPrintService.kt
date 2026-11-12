@@ -9,6 +9,7 @@ import android.printservice.PrintJob
 import android.printservice.PrintService
 import android.printservice.PrinterDiscoverySession
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import com.marjho.printservice.network.DestinoImpresion
 import com.marjho.printservice.network.BuscadorImpresorasRed
 import com.marjho.printservice.network.ImpresoraEncontrada
@@ -37,18 +38,58 @@ class MarjhoPrintService : PrintService() {
 
     override fun onCreatePrinterDiscoverySession(): PrinterDiscoverySession = MarjhoDiscoverySession(this)
 
+    override fun onConnected() {
+        super.onConnected()
+        // Xiaomi's print spooler can reconnect the service after a job was
+        // queued without replaying onPrintJobQueued. Recover those jobs when
+        // Android reconnects so they do not remain stuck in the system queue.
+        val jobs = runCatching { getActivePrintJobs() }
+            .onFailure { Log.e(TAG, "No se pudieron recuperar los trabajos activos", it) }
+            .getOrDefault(emptyList())
+        Log.i(TAG, "Servicio conectado; trabajos activos=${jobs.size}")
+        jobs.filter { runCatching { it.isQueued }.getOrDefault(false) }
+            .forEach { onPrintJobQueued(it) }
+    }
+
+    override fun onDisconnected() {
+        Log.i(TAG, "Android desconectó el servicio de impresión")
+        super.onDisconnected()
+    }
+
     override fun onPrintJobQueued(printJob: PrintJob) {
         val jobKey = printJob.id.toString()
+        if (activeJobs.containsKey(jobKey)) {
+            Log.i(TAG, "Se ignora el trabajo duplicado id=$jobKey")
+            return
+        }
+        val printerLocalId = runCatching { printJob.info.printerId?.localId }
+            .onFailure { Log.e(TAG, "No se pudo leer la impresora del trabajo $jobKey", it) }
+            .getOrNull()
+        Log.i(TAG, "Trabajo en cola id=$jobKey printer=$printerLocalId queued=${runCatching { printJob.isQueued }.getOrNull()}")
+        // PrintJob state queries and transitions are main-thread-only Android
+        // APIs; only document copying and network transfer run on the IO scope.
+        val started = runCatching { printJob.start() }.getOrElse { error ->
+            Log.e(TAG, "No se pudo iniciar el trabajo $jobKey", error)
+            runCatching { printJob.fail(error.localizedMessage ?: "No se pudo iniciar el trabajo de impresión.") }
+            return
+        }
+        Log.i(TAG, "Inicio del trabajo id=$jobKey resultado=$started")
+        if (!started) {
+            runCatching {
+                if (printJob.isQueued) printJob.fail("Android no pudo iniciar el trabajo de impresión.")
+            }
+            return
+        }
+
         val work = serviceScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val printerLocalId = runCatching { printJob.info.printerId?.localId }.getOrNull()
                 val destino = printerLocalId?.let(destinationsByPrinterId::get)
                     ?: DestinoImpresion.desde(getSharedPreferences(PREFS, Context.MODE_PRIVATE))
                     ?: throw IllegalStateException("Elegí una impresora compatible desde MARJHO Print Service.")
+                Log.i(TAG, "Procesando id=$jobKey destino=${destino.ip} tipo=${destino.rutaDirecta}")
                 require(destino.puedeImprimirPdfPorIpp || destino.esEpsonL4150) {
                     "No se confirmó un controlador compatible para la impresora seleccionada."
                 }
-                printJob.start()
                 val pdf = File(cacheDir, "marjho_print_${System.currentTimeMillis()}.pdf")
                 try {
                     val documentData = printJob.document.data
@@ -57,24 +98,39 @@ class MarjhoPrintService : PrintService() {
                         )
 
                     copyDocument(documentData, pdf)
+                    Log.i(TAG, "Documento listo id=$jobKey bytes=${pdf.length()} destino=${destino.ip}")
                     val coroutineJob = currentCoroutineContext()[Job]
                     if (destino.esEpsonL4150 && (destino.forzarEscpr || !destino.puedeImprimirPdfPorIpp)) {
+                        Log.i(TAG, "Enviando id=$jobKey por ESC/P-R")
                         ProtocoloImpresion.imprimirEscpr(destino, pdf) {
                             if (coroutineJob?.isActive != true) throw CancellationException("Trabajo cancelado por el usuario.")
                         }
                     } else {
                         if (coroutineJob?.isActive != true) throw CancellationException("Trabajo cancelado por el usuario.")
+                        Log.i(TAG, "Enviando id=$jobKey por IPP")
                         ProtocoloImpresion.imprimirPdf(destino, pdf)
                     }
-                    printJob.complete()
+                    Log.i(TAG, "Transmisión terminada id=$jobKey")
+                    withContext(Dispatchers.Main.immediate) {
+                        if (printJob.isStarted) printJob.complete()
+                    }
+                    Log.i(TAG, "Trabajo completado id=$jobKey")
                 } finally {
                     pdf.delete()
                 }
             } catch (cancelled: CancellationException) {
-                printJob.cancel()
+                Log.i(TAG, "Trabajo cancelado id=$jobKey")
+                withContext(Dispatchers.Main.immediate) {
+                    if (printJob.isQueued || printJob.isStarted || printJob.isBlocked) printJob.cancel()
+                }
                 throw cancelled
             } catch (error: Exception) {
-                printJob.fail(error.localizedMessage ?: "Error de impresión local.")
+                Log.e(TAG, "Falló el trabajo id=$jobKey: ${error.localizedMessage}", error)
+                withContext(Dispatchers.Main.immediate) {
+                    if (printJob.isQueued || printJob.isStarted || printJob.isBlocked) {
+                        printJob.fail(error.localizedMessage ?: "Error de impresión local.")
+                    }
+                }
             } finally {
                 activeJobs.remove(jobKey)
             }
@@ -231,6 +287,7 @@ class MarjhoPrintService : PrintService() {
     }
 
     companion object {
+        private const val TAG = "MarjhoPrintService"
         private const val PREFS = "marjho_print_local"
     }
 }
