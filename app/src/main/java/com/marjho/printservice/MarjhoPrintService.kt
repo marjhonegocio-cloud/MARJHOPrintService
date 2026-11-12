@@ -2,6 +2,7 @@ package com.marjho.printservice
 
 import android.content.Context
 import android.print.PrintAttributes
+import android.print.PageRange
 import android.print.PrintDocumentInfo
 import android.print.PrintJobId
 import android.print.PrinterCapabilitiesInfo
@@ -98,9 +99,11 @@ class MarjhoPrintService : PrintService() {
         val pageCountAndroid = runCatching { printJob.document.info.pageCount }
             .onFailure { Log.e(TAG, "No se pudo leer la información del documento $jobKey", it) }
             .getOrDefault(PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
-        val requestedRanges = info.pages.orEmpty().joinToString { "${it.start}-${it.end}" }
+        val pageRanges = info.pages
+        val requestedRanges = pageRanges.orEmpty().joinToString { "${it.start}-${it.end}" }
+        val expectedPageCount = expectedSelectedPageCount(pageRanges, pageCountAndroid)
         Log.i(TAG, "Trabajo en cola id=$jobKey printer=$printerLocalId queued=${runCatching { printJob.isQueued }.getOrNull()} " +
-            "androidPages=$pageCountAndroid requested=$requestedRanges label=${info.label}")
+            "androidPages=$pageCountAndroid expectedPages=$expectedPageCount requested=$requestedRanges label=${info.label}")
         // PrintJob state queries and transitions are main-thread-only Android
         // APIs; only document copying and network transfer run on the IO scope.
         val started = runCatching { printJob.start() }.getOrElse { error ->
@@ -149,13 +152,12 @@ class MarjhoPrintService : PrintService() {
                         }
                     }
                     Log.i(TAG, "Documento local listo id=$jobKey bytes=${pdf.length()} androidPages=$pageCountAndroid " +
-                        "pdfPages=$pageCountPdf requested=$requestedRanges destino=${destino.ip}")
-                    if (pageCountAndroid > 0 && pageCountAndroid != pageCountPdf) {
-                        withContext(Dispatchers.Main.immediate) {
-                            if (printJob.isStarted) {
-                                printJob.setStatus("Android indicó $pageCountAndroid páginas; el PDF recibido contiene $pageCountPdf.")
-                            }
-                        }
+                        "pdfPages=$pageCountPdf expectedPages=$expectedPageCount requested=$requestedRanges destino=${destino.ip}")
+                    if (expectedPageCount != null && pageCountPdf != expectedPageCount) {
+                        throw IllegalStateException(
+                            "El navegador entregó $pageCountPdf de $expectedPageCount páginas. No se imprimió para evitar un PDF incompleto. " +
+                                "Volvé al selector, elegí Todas las páginas y esperá a que termine la vista previa; también podés abrir el PDF descargado en PDF View."
+                        )
                     }
                     val coroutineJob = currentCoroutineContext()[Job]
                     val mainHandler = Handler(Looper.getMainLooper())
@@ -241,6 +243,20 @@ class MarjhoPrintService : PrintService() {
         }
         require(destination.isFile && destination.length() > 0) { "El documento PDF está vacío." }
         require(destination.length() <= 30L * 1024 * 1024) { "El PDF supera el límite de 30 MB." }
+    }
+
+    /** Number of selected pages in the Android print job, accounting for ALL_PAGES. */
+    private fun expectedSelectedPageCount(ranges: Array<out PageRange>?, documentPageCount: Int): Int? {
+        if (ranges.isNullOrEmpty()) return documentPageCount.takeIf { it > 0 }
+        if (ranges.any { it == PageRange.ALL_PAGES || it.end == Int.MAX_VALUE }) {
+            return documentPageCount.takeIf { it > 0 }
+        }
+        val lastDocumentIndex = documentPageCount.takeIf { it > 0 }?.minus(1)
+        val selected = ranges.sumOf { range ->
+            val last = minOf(range.end, lastDocumentIndex ?: range.end).toLong()
+            (last - range.start.toLong() + 1L).coerceAtLeast(0L)
+        }
+        return selected.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().takeIf { it > 0 }
     }
 
     private class MarjhoDiscoverySession(private val owner: MarjhoPrintService) : PrinterDiscoverySession() {
